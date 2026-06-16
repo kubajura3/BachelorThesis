@@ -38,6 +38,7 @@ single_dog_training/
 - **α-Alignment Mechanism**: Blends real physics and SRBD predictions (default α=0.9)
 - **Raibert Foothold Planning**: Adaptive foothold calculation based on velocity feedback
 - **Multi-Environment Parallel Training**: Supports training multiple robots simultaneously (default 16, scales to ~1000+)
+- **Domain Randomization** (optional, independent per-env switches): velocity command (`rand_cmd`), gait (`gait_mode = -1` + `gait_choices`), step frequency (`rand_step_freq`), and terrain + spawn placement (`use_complex_terrain`, `rand_spawn_xy`). All robots share one terrain surface and spawn at the correct local terrain height under their own (x, y)
 - **GPU Acceleration**: Uses Isaac Gym's GPU physics pipeline
 - **Custom CUDA Kernel for SRBD** (optional): Fused kernel that replaces the per-step PyTorch ops with a single launch; toggled via `CUDA_KERNEL_SRBD` in `config.py`. Backward compatibility with autograd is preserved (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional))
 
@@ -126,9 +127,19 @@ Main configuration in `EnvCfg` class in `config.py`:
 - `pd_kd = 2`: PD controller derivative gain
 
 ### Gait Parameters
-- `step_freq = 1.6`: Step frequency (Hz)
+- `step_freq = 1.6`: Step frequency (Hz) — used as the constant cadence when the two switches below are off
+- `rand_step_freq = False`: Randomize step frequency per env in `[step_freq_min, step_freq_max]`; constant `step_freq` when off
+- `step_freq_from_cmd = False`: Derive step frequency from `|velocity command|` instead (fixed-stride mode); overrides `step_freq` each step when on
 - `swing_height = 0.12`: Swing height (meters)
-- `gait_mode = 1`: Gait mode (-1=random, 0=stand, 1=trot, 2=pace, 3=bound, 4=gallop)
+- `gait_mode = 1`: Gait mode (-1=random per-env, 0=stand, 1=trot, 2=pace, 3=bound, 4=gallop)
+- `gait_choices = (0,1,2,3,4)`: Gait ids eligible when `gait_mode < 0` (e.g. `(1,2,3,4)` excludes stand)
+- `rand_cmd = False`: Randomize velocity command per env; `cmd_fixed = (vx,vy,yaw)` is used when off
+
+### Terrain & placement (all robots share one terrain surface)
+- `use_complex_terrain = False`: `True` = random rough heightfield, `False` = flat ground plane
+- `rand_spawn_xy = False`: `True` = re-scatter each robot's (x,y) across the terrain on every reset;
+  robots spawn at the local terrain height under their own (x,y) either way
+- `spawn_area_half_m = 8.0`: half-extent (m) of the scatter region (kept well within the terrain bounds)
 
 ### Training Parameters
 - `num_envs = 16`: Number of parallel environments
@@ -137,7 +148,6 @@ Main configuration in `EnvCfg` class in `config.py`:
 
 ### Global Switches
 - `PURE_PAPER_MODE = True`: Pure paper version (no engineering tricks)
-- `USE_COMPLEX_TERRAIN = False`: Use random rough terrain
 - `ONLY_ITERATE_NO_RESET = True`: Only reset on first iteration
 - `CUDA_KERNEL_SRBD = False`: Use the custom fused CUDA kernel for `_srbd_step`. `False` = pure PyTorch (default, always works). `True` = CUDA kernel (requires `python setup.py build_ext --inplace` first; see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional)).
 
@@ -166,7 +176,7 @@ After training completes, the following files are generated in the `results/` fo
 
 - **config.py**: Centralized management of all configuration parameters and global switches
 - **utils_math.py**: Provides quaternion, rotation matrix, gravity projection and other math utilities
-- **terrain.py**: Creates flat or random rough terrain
+- **terrain.py**: Creates flat or random rough terrain; for rough terrain it returns a `TerrainData` (heightfield + scales/offsets) so the env can look up surface height at any (x, y) for spawn placement
 - **policy.py**: Defines neural network policy (36-dim input → 256×256 → 12-dim output)
 - **gait.py**: `GaitPlanner` class, handles gait planning, phase management, foothold calculation
 - **srbd.py**: `SRBDModel` class, implements simplified rigid body dynamics forward propagation

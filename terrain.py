@@ -1,4 +1,6 @@
 # ---------------- Isaac Gym ----------------
+from dataclasses import dataclass
+
 try:
     from isaacgym import gymapi, terrain_utils
     ISAAC_AVAILABLE = True
@@ -6,6 +8,22 @@ except Exception:
     ISAAC_AVAILABLE = False
     gymapi = None
     terrain_utils = None
+
+
+@dataclass
+class TerrainData:
+    """Everything needed to look up the shared terrain's surface height at a world (x, y).
+
+    height_field_raw : (num_rows, num_cols) int16 heightfield (rows ~ world x, cols ~ world y)
+    horizontal_scale : meters per heightfield cell
+    vertical_scale   : meters per height unit (height_m = raw * vertical_scale)
+    x_offset/y_offset: world coords of cell (0, 0) = the mesh transform origin
+    """
+    height_field_raw: object
+    horizontal_scale: float
+    vertical_scale: float
+    x_offset: float
+    y_offset: float
 
 
 def _setup_physx_stable(sim_params, use_gpu=True):
@@ -55,6 +73,8 @@ def create_ground_plane(gym, sim):
     print("DEBUG 3: before add_ground", flush=True)
     gym.add_ground(sim, plane_params)
     print("DEBUG 4: after add_ground", flush=True)
+    # Flat plane: no heightfield to sample -> spawn height is just h0.
+    return None
 
 
 def create_random_rough_terrain(gym, sim):
@@ -127,3 +147,12 @@ def create_random_rough_terrain(gym, sim):
         tm_params,
     )
     print("DEBUG 4: after add_triangle_mesh", flush=True)
+
+    # Retain the heightfield + scales/offsets so the env can sample surface height at any (x, y).
+    return TerrainData(
+        height_field_raw=heightfield,
+        horizontal_scale=horizontal_scale,
+        vertical_scale=vertical_scale,
+        x_offset=tm_params.transform.p.x,
+        y_offset=tm_params.transform.p.y,
+    )

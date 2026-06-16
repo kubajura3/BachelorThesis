@@ -20,10 +20,8 @@ ONLY_ITERATE_NO_RESET = True
 # True: no reset
 # False: reset
 
-# ⭐ Whether to use complex random terrain
-USE_COMPLEX_TERRAIN = False
-# True  = Use random heightfield terrain (approximately infinite plane)
-# False = Use original flat ground plane
+# Note: terrain selection moved into EnvCfg.use_complex_terrain (flat field) so all
+# randomization switches live in one place. See EnvCfg below.
 
 # ===============================
 # ⭐ SRBD CUDA Kernel Switch
@@ -84,6 +82,9 @@ class EnvCfg:
     #  3: bound
     #  4: gallop
     gait_mode: int = 1
+    # When gait_mode < 0 (random per env), sample only from these gait ids.
+    # e.g. (1, 2, 3, 4) excludes "stand"; (0,1,2,3,4) allows all.
+    gait_choices: tuple = (0, 1, 2, 3, 4)
     trot_style: str = "normal"   # "normal" | "walk" | "run"
     # trot_style = "normal"  # β=0.5 (Fig 9.2a)
     # trot_style = "walk"    # β=0.6 (Fig 9.2b)
@@ -110,8 +111,9 @@ class EnvCfg:
     term_penalty: float = 200.0
 
     #============================================
-    # Random velocity command switch - True: on; False: off (fixed 0.2 m/s)
+    # Random velocity command switch - True: on; False: off (use cmd_fixed)
     rand_cmd: bool = False       # True: sample cmd_B on reset/reset_envs; False: use constant cmd
+    cmd_fixed: tuple = (0.5, 0.0, 0.0)   # (vx, vy, yaw_rate) used when rand_cmd=False
     # trot/pace    0.5 - 1 m/s
     # bound/gallop 1 - 2 m/s
     # Increase velocity command: previous 0.1-0.3 too slow, Raibert foothold displacement too small
@@ -133,6 +135,11 @@ class EnvCfg:
 
     # Number of parallel environments = number of parallel robots
     num_envs: int = 16
+
+    # terrain (one shared surface for all robots; see env._terrain_height / _sample_spawn_xy)
+    use_complex_terrain: bool = False   # True = random rough heightfield; False = flat ground plane
+    rand_spawn_xy: bool = False         # True = re-scatter each robot's (x,y) across terrain on reset
+    spawn_area_half_m: float = 8.0      # half-extent (m) of the scatter region (well within terrain bounds)
 
     cmd_deadzone: float = 0.05   # m/s, threshold for “stop”
 

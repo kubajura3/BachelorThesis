@@ -73,7 +73,7 @@ class GaitPlanner:
         L_land = L_table[gait_ids].clamp(min=1e-3)  # (B,)
 
         # -------- rough terrain scaling (conservative: smaller step, slightly lower freq, higher lift) --------
-        rough = 1.0 if bool(globals().get("USE_COMPLEX_TERRAIN", False)) else 0.0
+        rough = 1.0 if bool(getattr(cfg, "use_complex_terrain", False)) else 0.0
         L_land = L_land * (1.0 - 0.10 * rough)               # Stride shorter
         freq_scale = (1.0 - 0.15 * rough)                    # Frequency more conservative (lower)
         #height_scale = (1.0 + 0.40 * rough)                  # Lift higher

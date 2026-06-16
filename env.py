@@ -20,7 +20,6 @@ from config import (
     DBG_INIT_FALL_EVERY,
     DBG_INIT_FALL_STEPS,
     PURE_PAPER_MODE,
-    USE_COMPLEX_TERRAIN,
     EnvCfg,
 )
 from gait import GaitPlanner
@@ -135,13 +134,26 @@ class RealQuadEnv:
         print("DEBUG 2: after create_sim", flush=True)
         assert self.sim is not None, "create_sim failed"
 
-        # ===== Terrain / ground: choose based on switch =====
-        if USE_COMPLEX_TERRAIN:
-            print("[Terrain] USE_COMPLEX_TERRAIN=True -> using random heightfield terrain")
-            create_random_rough_terrain(self.gym, self.sim)
+        # ===== Terrain / ground: one shared surface, chosen by cfg switch =====
+        if self.cfg.use_complex_terrain:
+            print("[Terrain] use_complex_terrain=True -> using random heightfield terrain")
+            self.terrain = create_random_rough_terrain(self.gym, self.sim)
         else:
-            print("[Terrain] USE_COMPLEX_TERRAIN=False -> using flat ground plane")
-            create_ground_plane(self.gym, self.sim)
+            print("[Terrain] use_complex_terrain=False -> using flat ground plane")
+            self.terrain = create_ground_plane(self.gym, self.sim)
+
+        # Precompute device-side height samples (meters) for spawn-height lookup.
+        # None on a flat plane -> _terrain_height() returns 0.
+        if self.terrain is not None:
+            self.height_samples = (
+                torch.as_tensor(self.terrain.height_field_raw, device=self.device, dtype=torch.float32)
+                * float(self.terrain.vertical_scale)
+            )
+            self._terr_h_scale = float(self.terrain.horizontal_scale)
+            self._terr_x_offset = float(self.terrain.x_offset)
+            self._terr_y_offset = float(self.terrain.y_offset)
+        else:
+            self.height_samples = None
 
 
         # Create multiple envs, one go2 per env
@@ -479,92 +491,163 @@ class RealQuadEnv:
 
         return self._contact_state.unsqueeze(-1)  # (B,4,1)
 
+    # ============================================================
+    # Per-env sampling helpers — shared by reset() (all envs) and
+    # reset_envs() (a subset). Each takes a 1D LongTensor of env ids.
+    # ============================================================
+    def _as_env_ids(self, env_ids):
+        """Normalize env_ids to a 1D LongTensor on device. None -> all envs."""
+        dev = self.device
+        if env_ids is None:
+            return torch.arange(self.B, device=dev, dtype=torch.long)
+        if not torch.is_tensor(env_ids):
+            env_ids = torch.as_tensor(env_ids, device=dev, dtype=torch.long)
+        else:
+            env_ids = env_ids.to(device=dev, dtype=torch.long)
+        return env_ids.view(-1)
+
+    def _sample_gait(self, env_ids):
+        """Assign gait id + leg phase offsets. gait_mode<0 -> random from cfg.gait_choices."""
+        if not hasattr(self, "gait_table"):
+            return
+        dev = self.device
+        n = env_ids.numel()
+        if self.cfg.gait_mode < 0:
+            choices = torch.as_tensor(
+                getattr(self.cfg, "gait_choices", tuple(range(self.num_gaits))),
+                device=dev, dtype=torch.long,
+            ).clamp(0, self.num_gaits - 1)
+            new_gids = choices[torch.randint(low=0, high=choices.numel(), size=(n,), device=dev)]
+        else:
+            gid = max(0, min(self.num_gaits - 1, int(self.cfg.gait_mode)))
+            new_gids = torch.full((n,), gid, dtype=torch.long, device=dev)
+        self.gait_ids[env_ids] = new_gids
+        self.leg_phase_offsets_B[env_ids] = self.gait_table[new_gids]
+
+    def _sample_command(self, env_ids):
+        """Sample velocity command cmd_rand (+ vx_star alias). rand_cmd off -> cfg.cmd_fixed."""
+        dev = self.device
+        n = env_ids.numel()
+        cfg = self.cfg
+        if cfg.rand_cmd:
+            vx  = torch.empty(n, device=dev).uniform_(cfg.vx_min,  cfg.vx_max)
+            vy  = torch.empty(n, device=dev).uniform_(cfg.vy_min,  cfg.vy_max)
+            yaw = torch.empty(n, device=dev).uniform_(cfg.yaw_min, cfg.yaw_max)
+        else:
+            cmd_fixed = getattr(cfg, "cmd_fixed", (0.5, 0.0, 0.0))
+            vx  = torch.full((n,), float(cmd_fixed[0]), device=dev)
+            vy  = torch.full((n,), float(cmd_fixed[1]), device=dev)
+            yaw = torch.full((n,), float(cmd_fixed[2]), device=dev)
+        self.cmd_rand[env_ids, 0] = vx
+        self.cmd_rand[env_ids, 1] = vy
+        self.cmd_rand[env_ids, 2] = yaw
+        self.vx_star[env_ids]     = vx   # alias still used by Raibert / loss
+
+    def _sample_step_freq(self, env_ids):
+        """Sample per-env step frequency. rand_step_freq off -> constant cfg.step_freq."""
+        dev = self.device
+        cfg = self.cfg
+        if not hasattr(self, "step_freq_B"):
+            self.step_freq_B = torch.full((self.B,), cfg.step_freq, device=dev)
+        if getattr(cfg, "rand_step_freq", False):
+            self.step_freq_B[env_ids] = torch.empty(env_ids.numel(), device=dev).uniform_(
+                cfg.step_freq_min, cfg.step_freq_max
+            )
+        else:
+            self.step_freq_B[env_ids] = cfg.step_freq
+
+    def _sample_swing_height(self, env_ids):
+        """Reset swing height to the configured default for env_ids."""
+        if not hasattr(self, "swing_height_B"):
+            self.swing_height_B = torch.full((self.B,), self.cfg.swing_height, device=self.device)
+        self.swing_height_B[env_ids] = self.cfg.swing_height
+
+    def _terrain_height(self, xy):
+        """World (N,2) -> shared-terrain surface height z (N,). Flat plane -> zeros."""
+        if getattr(self, "height_samples", None) is None:
+            return torch.zeros(xy.shape[0], device=self.device)
+        hs = self.height_samples                      # (H, W) meters
+        H, W = hs.shape
+        ix = ((xy[:, 0] - self._terr_x_offset) / self._terr_h_scale).round().long().clamp(0, H - 1)
+        iy = ((xy[:, 1] - self._terr_y_offset) / self._terr_h_scale).round().long().clamp(0, W - 1)
+        return hs[ix, iy]
+
+    def _sample_spawn_xy(self, env_ids):
+        """Assign each robot's spawn (x,y) on the shared terrain.
+
+        rand_spawn_xy -> uniform in +-spawn_area_half_m (re-scattered each reset);
+        otherwise keep the current spots (defaults to the Isaac env-grid origins, so
+        legacy placement is preserved when scattering is off).
+        """
+        dev = self.device
+        cfg = self.cfg
+        if not hasattr(self, "spawn_xy"):
+            self.spawn_xy = self.env_origins[:, 0:2].clone()
+        if getattr(cfg, "rand_spawn_xy", False):
+            n = env_ids.numel()
+            half = float(getattr(cfg, "spawn_area_half_m", 8.0))
+            self.spawn_xy[env_ids, 0] = torch.empty(n, device=dev).uniform_(-half, half)
+            self.spawn_xy[env_ids, 1] = torch.empty(n, device=dev).uniform_(-half, half)
+
+    def _write_spawn_pose(self, env_ids):
+        """Random yaw + root-state pose for env_ids, with terrain-aware spawn z and
+        aerial-phase rejection (ensure >=2 feet would be in stance at the chosen phase)."""
+        dev = self.device
+        n = env_ids.numel()
+        if not hasattr(self, "phase"):
+            self.phase = torch.zeros(self.B, device=dev)
+
+        # Random initial phase, avoiding landing mid-aerial (need >=2 stance feet)
+        max_try = 50
+        for _ in range(max_try):
+            phase_try = 2 * math.pi * torch.rand(n, device=dev)              # (n,)
+            phase_offsets = self.leg_phase_offsets_B[env_ids]               # (n,4)
+            phases = phase_offsets + phase_try.view(n, 1)                   # (n,4)
+            beta_B, _, _ = self.gait._get_beta_minfeet_allow_aerial()       # (B,)
+            beta_sub = beta_B[env_ids]                                      # (n,)
+            stance = (self.gait._phase_u(phases) < beta_sub.view(n, 1)).float()
+            if (stance.sum(dim=1) >= 2).all():
+                self.phase[env_ids] = phase_try
+                break
+        else:
+            self.phase[env_ids] = phase_try
+
+        # Random yaw + placement (x,y) + terrain-aware z
+        self.gym.refresh_actor_root_state_tensor(self.sim)
+        yaws = torch.empty(n, device=dev).uniform_(-math.pi, math.pi)
+        self.last_reset_yaw[env_ids] = yaws.clone()
+
+        self._sample_spawn_xy(env_ids)
+        xy = self.spawn_xy[env_ids]                                         # (n,2)
+        z  = self._terrain_height(xy) + self.cfg.h0                         # (n,)
+
+        half = 0.5 * yaws
+        self.root_state[env_ids, 0] = xy[:, 0]
+        self.root_state[env_ids, 1] = xy[:, 1]
+        self.root_state[env_ids, 2] = z
+        # yaw-only quaternion, Isaac xyzw order: qx=qy=0, qz=sin(yaw/2), qw=cos(yaw/2)
+        self.root_state[env_ids, 3] = 0.0
+        self.root_state[env_ids, 4] = 0.0
+        self.root_state[env_ids, 5] = torch.sin(half)
+        self.root_state[env_ids, 6] = torch.cos(half)
+        # zero linear + angular velocity
+        self.root_state[env_ids, 7:13] = 0.0
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_state))
+
     # reset - make all robots stand properly again
     def reset(self, it: Optional[int] = None):
         dev = self.device
 
         self.t = 0
-        # 1) Gait selection: random or fixed
-        if hasattr(self, "gait_table"):
-            if self.cfg.gait_mode < 0:
-                # -1: random gait per env
-                self.gait_ids = torch.randint(
-                    low=0, high=self.num_gaits, size=(self.B,), device=dev
-                )
-            else:
-                # Fixed gait, same for all envs
-                gid = int(self.cfg.gait_mode)
-                gid = max(0, min(self.num_gaits - 1, gid))
-                self.gait_ids = torch.full(
-                    (self.B,), gid, dtype=torch.long, device=dev
-                )
+        all_ids = self._as_env_ids(None)   # all envs
 
-            # Update phase offset for each env based on gait_ids
-            self.leg_phase_offsets_B = self.gait_table[self.gait_ids]      # (B,4)
-
-        # 2) Random initial phase (B)
-        #self.phase = 2 * math.pi * torch.rand(self.B, device=dev)
-
-        # 2) Random initial phase (B) —— but avoid landing in “aerial phase”
-        max_try = 50
-        for _ in range(max_try):
-            phase_try = 2 * math.pi * torch.rand(self.B, device=dev)      # (B,)
-            phases = self.leg_phase_offsets_B + phase_try.view(self.B, 1) # (B,4)
-            beta_B, _, _ = self.gait._get_beta_minfeet_allow_aerial()          # (B,)
-            stance = (self.gait._phase_u(phases) < beta_B.view(self.B, 1)).float()  # (B,4)
-            ok = (stance.sum(dim=1) >= 2)                                 # (B,)
-            if ok.all():
-                self.phase = phase_try
-                break
-        else:
-            self.phase = phase_try  # If really can't find, accept it (usually won't reach here)
-        # 3) Random yaw for each env (batched)
-        yaws = torch.empty(self.B, device=dev).uniform_(-math.pi, math.pi)
-        self.last_reset_yaw = yaws.clone()
-
-        # root state (batched write over all envs)
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-        # position = env origin, raised by h0 in z
-        self.root_state[:, 0] = self.env_origins[:, 0]
-        self.root_state[:, 1] = self.env_origins[:, 1]
-        self.root_state[:, 2] = self.env_origins[:, 2] + self.cfg.h0
-        # yaw-only quaternion, Isaac xyzw order: qx=qy=0, qz=sin(yaw/2), qw=cos(yaw/2)
-        half = 0.5 * yaws
-        self.root_state[:, 3] = 0.0
-        self.root_state[:, 4] = 0.0
-        self.root_state[:, 5] = torch.sin(half)
-        self.root_state[:, 6] = torch.cos(half)
-        # zero linear + angular velocity
-        self.root_state[:, 7:13] = 0.0
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_state))
-
-        # 3) Body forward target velocity vx_star (B,)
-        #vx = 0.2
-        #self.vx_star = torch.full((self.B,), vx, device=dev)
-
-        # 3) High-level random velocity command cmd_rand = [vx_cmd, vy_cmd, yaw_rate_cmd]
-        if self.cfg.rand_cmd:
-            vx_rand  = torch.empty(self.B, device=dev).uniform_(self.cfg.vx_min, self.cfg.vx_max)
-            vy_rand  = torch.empty(self.B, device=dev).uniform_(self.cfg.vy_min, self.cfg.vy_max)
-            yaw_rand = torch.empty(self.B, device=dev).uniform_(self.cfg.yaw_min, self.cfg.yaw_max)
-        else:
-            vx_rand  = torch.full((self.B,), 0.5,  device=dev)  # Simple task with fixed 0.2 m/s in paper
-            vy_rand  = torch.zeros(self.B, device=dev)
-            yaw_rand = torch.zeros(self.B, device=dev)
-
-        self.cmd_rand = torch.stack([vx_rand, vy_rand, yaw_rand], dim=1)  # (B,3)
-        self.vx_star  = self.cmd_rand[:, 0]                               # Backward compatibility (only use vx)
-
-
-        # === Velocity-related step frequency / swing height (per-env) ===
-        # step frequency (Hz): for Example 3.3, sample uniformly in [step_freq_min, step_freq_max] on reset
-        if getattr(self.cfg, "rand_step_freq", False):
-            self.step_freq_B = torch.empty(self.B, device=dev).uniform_(self.cfg.step_freq_min, self.cfg.step_freq_max)
-        else:
-            self.step_freq_B = torch.full((self.B,), self.cfg.step_freq, device=dev)
-
-        # keep swing height as a constant by default (you can also make it depend on vx_star if you want)
-        self.swing_height_B = torch.full((self.B,), self.cfg.swing_height, device=dev)
+        # 1) Gait, 2) spawn pose (phase + yaw + terrain-aware placement),
+        # 3) velocity command, 4) step frequency / swing height — all shared with reset_envs()
+        self._sample_gait(all_ids)
+        self._write_spawn_pose(all_ids)
+        self._sample_command(all_ids)
+        self._sample_step_freq(all_ids)
+        self._sample_swing_height(all_ids)
 
         # 4) Joint targets back to default posture
         base_local = torch.as_tensor(self.q_default_full, device=dev, dtype=torch.float32)
@@ -645,119 +728,19 @@ class RealQuadEnv:
         “randomized but controlled initial posture + random velocity command”.
         env_ids: can be int / list[int] / numpy / torch.Tensor
         """
-        dev = self.device
-
-        # Unify to 1D LongTensor
-        if not torch.is_tensor(env_ids):
-            env_ids = torch.as_tensor(env_ids, device=dev, dtype=torch.long)
-        else:
-            env_ids = env_ids.to(device=dev, dtype=torch.long)
+        env_ids = self._as_env_ids(env_ids)
         if env_ids.numel() == 0:
             return
-        env_ids = env_ids.view(-1)
-
-        # 1) Choose gait for these envs
-        if hasattr(self, "gait_table"):
-            if self.cfg.gait_mode < 0:
-                # -1: random gait per env
-                new_gids = torch.randint(
-                    low=0, high=self.num_gaits,
-                    size=(env_ids.numel(),),
-                    device=dev
-                )
-            else:
-                gid = int(self.cfg.gait_mode)
-                gid = max(0, min(self.num_gaits - 1, gid))
-                new_gids = torch.full(
-                    (env_ids.numel(),),
-                    gid,
-                    dtype=torch.long,
-                    device=dev
-                )
-            # Update gait_id and phase offset for these robots
-            self.gait_ids[env_ids] = new_gids
-            self.leg_phase_offsets_B[env_ids] = self.gait_table[new_gids]
-
-        # 2) Random initial phase for these robots
-        #self.phase[env_ids] = 2 * math.pi * torch.rand(env_ids.numel(), device=dev)
-
-        # 2) Random initial phase for these robots —— but avoid landing in “aerial phase”
+        dev = self.device
         n = env_ids.numel()
-        max_try = 50
-        for _ in range(max_try):
-            phase_try = 2 * math.pi * torch.rand(n, device=dev)  # (n,)
-            # Get phase offsets for this batch of envs
-            phase_offsets = self.leg_phase_offsets_B[env_ids]    # (n,4)
-            phases = phase_offsets + phase_try.view(n, 1)        # (n,4)
-            # Get beta for this batch of envs (note: _get_beta... generates for full B, so take subset)
-            beta_B, _, _ = self.gait._get_beta_minfeet_allow_aerial() # (B,)
-            beta_sub = beta_B[env_ids]                            # (n,)
 
-            stance = (self.gait._phase_u(phases) < beta_sub.view(n, 1)).float()  # (n,4)
-            ok = (stance.sum(dim=1) >= 2)                                   # (n,)
-            if ok.all():
-                self.phase[env_ids] = phase_try
-                break
-        else:
-            self.phase[env_ids] = phase_try
-        # 3) Random yaw & root state (base pose + vel) for these robots
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-
-        # Random yaw (batched)
-        yaws = torch.empty(n, device=dev).uniform_(-math.pi, math.pi)
-        self.last_reset_yaw[env_ids] = yaws.clone()
-
-        # Write back to root_state (batched over env_ids)
-        half = 0.5 * yaws
-        self.root_state[env_ids, 0] = self.env_origins[env_ids, 0]
-        self.root_state[env_ids, 1] = self.env_origins[env_ids, 1]
-        self.root_state[env_ids, 2] = self.env_origins[env_ids, 2] + self.cfg.h0
-        # yaw-only quaternion, Isaac xyzw order: qx=qy=0, qz=sin(yaw/2), qw=cos(yaw/2)
-        self.root_state[env_ids, 3] = 0.0
-        self.root_state[env_ids, 4] = 0.0
-        self.root_state[env_ids, 5] = torch.sin(half)
-        self.root_state[env_ids, 6] = torch.cos(half)
-        # Clear linear velocity / angular velocity
-        self.root_state[env_ids, 7:13] = 0.0
-
-        self.gym.set_actor_root_state_tensor(
-            self.sim, gymtorch.unwrap_tensor(self.root_state)
-        )
-
-        # 4) Reset / randomize velocity command cmd_rand for these robots
-        if not hasattr(self, "cmd_rand"):
-            self.cmd_rand = torch.zeros(self.B, 3, device=dev)
-        if not hasattr(self, "vx_star"):
-            self.vx_star = torch.zeros(self.B, device=dev)
-
-        if self.cfg.rand_cmd:
-            vx_rand  = torch.empty(env_ids.numel(), device=dev).uniform_(self.cfg.vx_min,  self.cfg.vx_max)
-            vy_rand  = torch.empty(env_ids.numel(), device=dev).uniform_(self.cfg.vy_min,  self.cfg.vy_max)
-            yaw_rand = torch.empty(env_ids.numel(), device=dev).uniform_(self.cfg.yaw_min, self.cfg.yaw_max)
-        else:
-            vx_rand  = torch.full((env_ids.numel(),), 0.5, device=dev)
-            vy_rand  = torch.zeros(env_ids.numel(), device=dev)
-            yaw_rand = torch.zeros(env_ids.numel(), device=dev)
-
-        self.cmd_rand[env_ids, 0] = vx_rand
-        self.cmd_rand[env_ids, 1] = vy_rand
-        self.cmd_rand[env_ids, 2] = yaw_rand
-        self.vx_star[env_ids]     = vx_rand      # Still used by Raibert / loss
-
-        # 5) Reset step frequency / swing height to default values
-        if not hasattr(self, "step_freq_B"):
-            self.step_freq_B = torch.full((self.B,), self.cfg.step_freq, device=dev)
-        if not hasattr(self, "swing_height_B"):
-            self.swing_height_B = torch.full((self.B,), self.cfg.swing_height, device=dev)
-
-        # step frequency: either resample or keep constant
-        if getattr(self.cfg, "rand_step_freq", False):
-            self.step_freq_B[env_ids] = torch.empty(env_ids.numel(), device=dev).uniform_(self.cfg.step_freq_min, self.cfg.step_freq_max)
-        else:
-            self.step_freq_B[env_ids] = self.cfg.step_freq
-
-        # swing height back to default
-        self.swing_height_B[env_ids] = self.cfg.swing_height
+        # 1) gait, 2) spawn pose (phase + yaw + terrain-aware placement),
+        # 3) velocity command, 4) step frequency / swing height — same helpers as reset()
+        self._sample_gait(env_ids)
+        self._write_spawn_pose(env_ids)
+        self._sample_command(env_ids)
+        self._sample_step_freq(env_ids)
+        self._sample_swing_height(env_ids)
 
         # 6) Reset joint targets for these robots back to default standing posture
         base_local = torch.as_tensor(self.q_default_full, device=dev, dtype=torch.float32)
