@@ -233,13 +233,19 @@ def train(num_iters=1000, steps_per_iter=24,
 
 
 
-            done = extra["done"]              # (B,)
+            done = extra["done"]              # (B,) falls
+            # Episode timeout (Rudin dynamic curriculum); all-False on flat/rough so behaviour there
+            # is unchanged (reset set == falls). Falls AND timeouts both reset, but only falls are
+            # penalised — Rudin gives no terminal reward for time-outs.
+            timeout = extra.get("timeout", torch.zeros_like(done))
+            reset_mask = done | timeout
 
-            # ★ Local reset for fallen robots; also assign new vx_star + gait for these envs
-            if done.any():
-                fallen_ids = torch.nonzero(done, as_tuple=False).squeeze(-1)
-                episodic_reward -= cfg.term_penalty * float(done.float().mean().item())
-                env.reset_envs(fallen_ids)
+            # ★ Local reset for fallen / timed-out robots; also assign new vx_star + gait for these envs
+            if reset_mask.any():
+                reset_ids = torch.nonzero(reset_mask, as_tuple=False).squeeze(-1)
+                if done.any():
+                    episodic_reward -= cfg.term_penalty * float(done.float().mean().item())
+                env.reset_envs(reset_ids)
 
         # ====== Eq.(5) individual loss terms ======
         if v_world_hist:

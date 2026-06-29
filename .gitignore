@@ -30,6 +30,7 @@ cuda-keyring_*.deb
 ARCHITECTURE.md
 REFACTOR_PLAN.md
 RANDOMIZATION_AND_TERRAIN_CHANGES.md
+RUDIN_TERRAIN_INTEGRATION.md
 # ===== Editor / OS =====
 .vscode/
 .idea/

@@ -38,7 +38,7 @@ single_dog_training/
 - **α-Alignment Mechanism**: Blends real physics and SRBD predictions (default α=0.9)
 - **Raibert Foothold Planning**: Adaptive foothold calculation based on velocity feedback
 - **Multi-Environment Parallel Training**: Supports training multiple robots simultaneously (default 16, scales to ~1000+)
-- **Domain Randomization** (optional, independent per-env switches): velocity command (`rand_cmd`), gait (`gait_mode = -1` + `gait_choices`), step frequency (`rand_step_freq`), and terrain + spawn placement (`use_complex_terrain`, `rand_spawn_xy`). All robots share one terrain surface and spawn at the correct local terrain height under their own (x, y)
+- **Domain Randomization** (optional, independent per-env switches): velocity command (`rand_cmd`), gait (`gait_mode = -1` + `gait_choices`), step frequency (`rand_step_freq`), and terrain + spawn placement (`terrain_type`, `rand_spawn_xy`). All robots share one terrain surface and spawn at the correct local terrain height under their own (x, y)
 - **GPU Acceleration**: Uses Isaac Gym's GPU physics pipeline
 - **Custom CUDA Kernel for SRBD** (optional): Fused kernel that replaces the per-step PyTorch ops with a single launch; toggled via `CUDA_KERNEL_SRBD` in `config.py`. Backward compatibility with autograd is preserved (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional))
 
@@ -136,10 +136,20 @@ Main configuration in `EnvCfg` class in `config.py`:
 - `rand_cmd = False`: Randomize velocity command per env; `cmd_fixed = (vx,vy,yaw)` is used when off
 
 ### Terrain & placement (all robots share one terrain surface)
-- `use_complex_terrain = False`: `True` = random rough heightfield, `False` = flat ground plane
-- `rand_spawn_xy = False`: `True` = re-scatter each robot's (x,y) across the terrain on every reset;
+- `terrain_type = "flat"`: `"flat"` = ground plane, `"rough"` = random rough heightfield,
+  `"rudin"` = Rudin et al. curriculum-grid landscape (rows = increasing difficulty, columns = terrain type)
+- `rand_spawn_xy = False` (`"rough"` mode): `True` = re-scatter each robot's (x,y) across the terrain on every reset;
   robots spawn at the local terrain height under their own (x,y) either way
 - `spawn_area_half_m = 8.0`: half-extent (m) of the scatter region (kept well within the terrain bounds)
+- `rudin_terrain` (`"rudin"` mode): grid config mirroring legged_gym (`num_rows`, `num_cols`,
+  `terrain_proportions`, `border_size`, `max_init_terrain_level`, …); robots are placed on the grid like
+  Rudin (random difficulty level ≤ `max_init_terrain_level`, terrain type spread across columns)
+- `rudin_spawn_jitter_m = 1.0`: ±m jitter around each robot's assigned cell origin on reset (matches legged_gym)
+
+> Note (`"rudin"` mode): use a large `num_envs` (hundreds–thousands). The grid spreads robots one
+> column at a time (`terrain_types = arange(num_envs) // (num_envs / num_cols)`), so with
+> `num_envs < num_cols` (e.g. default 16 vs 20) most columns stay empty — Rudin's scheme only fills
+> the landscape at the massively-parallel batch sizes it was designed for.
 
 ### Training Parameters
 - `num_envs = 16`: Number of parallel environments

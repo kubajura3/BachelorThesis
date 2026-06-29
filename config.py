@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ===============================
 # ⭐ Pure Paper Mode Switch
@@ -20,8 +20,8 @@ ONLY_ITERATE_NO_RESET = True
 # True: no reset
 # False: reset
 
-# Note: terrain selection moved into EnvCfg.use_complex_terrain (flat field) so all
-# randomization switches live in one place. See EnvCfg below.
+# Note: terrain selection lives in EnvCfg.terrain_type ("flat" | "rough" | "rudin") so all
+# randomization switches live in one place. See EnvCfg and RudinTerrainCfg below.
 
 # ===============================
 # ⭐ SRBD CUDA Kernel Switch
@@ -29,6 +29,36 @@ ONLY_ITERATE_NO_RESET = True
 CUDA_KERNEL_SRBD = True
 # True  = Use custom CUDA kernel for _srbd_step (requires: python setup.py build_ext --inplace)
 # False = Use PyTorch implementation (default, always works)
+
+
+@dataclass
+class RudinTerrainCfg:
+    """Mirror of Rudin et al. legged_gym terrain config (defaults match the paper code).
+
+    Used when EnvCfg.terrain_type == "rudin" to build the curriculum-grid landscape
+    (rows = increasing difficulty, columns = terrain-type variety). See terrain.Terrain.
+    """
+    mesh_type: str = "trimesh"          # only "trimesh" is supported here
+    horizontal_scale: float = 0.1       # [m] heightfield pixel resolution
+    vertical_scale: float = 0.005       # [m] per height unit
+    border_size: float = 25.0           # [m] flat border around the grid
+    curriculum: bool = True             # rows = increasing difficulty
+    selected: bool = False              # use a single hand-picked terrain instead of the grid
+    terrain_kwargs: object = None       # kwargs for the selected terrain (when selected=True)
+    terrain_length: float = 8.0         # [m] cell size along x (difficulty axis)
+    terrain_width: float = 8.0          # [m] cell size along y (type axis)
+    num_rows: int = 10                  # difficulty levels
+    num_cols: int = 20                  # terrain-type columns
+    # [smooth slope, rough slope, stairs, discrete obstacles, stepping stones]
+    terrain_proportions: list = field(default_factory=lambda: [0.1, 0.1, 0.35, 0.25, 0.2])
+    slope_treshold: float = 0.75        # (sic) slopes above this become vertical in trimesh
+    max_init_terrain_level: int = 5     # difficulty ceiling for initial placement
+    # Dynamic "game-inspired" curriculum (Rudin _update_terrain_curriculum): promote a robot one
+    # difficulty row when it walks > terrain_length/2 from its cell origin, demote it when it covers
+    # less than half its commanded distance, recycle robots that clear the hardest row. Runs on every
+    # per-env reset (fall or episode timeout). True = Rudin's behaviour; False = static placement only
+    # (the previous integration's behaviour). Only active when EnvCfg.terrain_type == "rudin".
+    dynamic_curriculum: bool = True
 
 
 @dataclass
@@ -110,6 +140,12 @@ class EnvCfg:
     # termination
     term_penalty: float = 200.0
 
+    # Episode length (seconds of sim time). Only used by the Rudin dynamic curriculum: a robot that
+    # neither falls nor finishes the episode is reset after this long, which is what lets the
+    # promote/demote logic advance (matches Rudin's episode_length_s = 20). max_episode_length (in
+    # env.step() units) is derived as ceil(episode_length_s / dt) in env.py. No effect on flat/rough.
+    episode_length_s: float = 20.0
+
     #============================================
     # Random velocity command switch - True: on; False: off (use cmd_fixed)
     rand_cmd: bool = False       # True: sample cmd_B on reset/reset_envs; False: use constant cmd
@@ -125,6 +161,14 @@ class EnvCfg:
     yaw_min: float = 0        # [rad/s]
     yaw_max: float = 0
     #============================================
+    # Rudin-matched omnidirectional command ranges, used ONLY when terrain_type == "rudin" (for the
+    # fair DiffSim-vs-PPO comparison). The flat/rough path keeps the forward-only vx/vy/yaw_* above.
+    # Mirrors legged_robot_config.commands.ranges (lin_vel_x/y = [-1,1] m/s, ang_vel_yaw = [-1,1] rad/s)
+    # and the deadband that zeros tiny commands (legged_robot._resample_commands).
+    rudin_cmd_lin_vel_x: tuple = (-1.0, 1.0)   # [m/s]
+    rudin_cmd_lin_vel_y: tuple = (-1.0, 1.0)   # [m/s]
+    rudin_cmd_ang_vel_yaw: tuple = (-1.0, 1.0) # [rad/s]
+    rudin_cmd_deadband: float = 0.2            # zero (vx,vy) when |v_xy| < this (Rudin)
 
 
     # contact & friction
@@ -137,9 +181,12 @@ class EnvCfg:
     num_envs: int = 16
 
     # terrain (one shared surface for all robots; see env._terrain_height / _sample_spawn_xy)
-    use_complex_terrain: bool = False   # True = random rough heightfield; False = flat ground plane
-    rand_spawn_xy: bool = False         # True = re-scatter each robot's (x,y) across terrain on reset
+    terrain_type: str = "flat"          # "flat" = ground plane | "rough" = random heightfield | "rudin" = curriculum grid
+    rand_spawn_xy: bool = False         # True = re-scatter each robot's (x,y) across terrain on reset ("rough" mode)
     spawn_area_half_m: float = 8.0      # half-extent (m) of the scatter region (well within terrain bounds)
+    # "rudin" mode: per-cell config + per-reset spawn jitter around the assigned grid origin
+    rudin_terrain: RudinTerrainCfg = field(default_factory=RudinTerrainCfg)
+    rudin_spawn_jitter_m: float = 1.0   # +-m jitter around the assigned cell origin (matches legged_gym)
 
     cmd_deadzone: float = 0.05   # m/s, threshold for “stop”
 

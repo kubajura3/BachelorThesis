@@ -24,7 +24,7 @@ from config import (
 )
 from gait import GaitPlanner
 from srbd import SRBDModel
-from terrain import _setup_physx_stable, create_ground_plane, create_random_rough_terrain
+from terrain import _setup_physx_stable, create_ground_plane, create_random_rough_terrain, create_rudin_terrain
 from utils_math import (
     quat_from_rpy,
     quat_rotate_inverse_wxyz,
@@ -45,6 +45,15 @@ class RealQuadEnv:
         # ★ High-level velocity command: cmd_rand = [vx_cmd, vy_cmd, yaw_rate_cmd]
         self.cmd_rand = torch.zeros(self.B, 3, device=self.device)   # (B,3)
         self.vx_star  = torch.zeros(self.B, device=self.device)      # Keep an alias for Raibert / loss
+
+        # Rudin dynamic-curriculum bookkeeping (only used when terrain_type == "rudin" and
+        # rudin_terrain.dynamic_curriculum). ep_len_buf counts env.step() calls since the last reset;
+        # a robot that neither falls nor finishes resets after max_episode_length steps (= 20 s of sim
+        # time at dt=0.002). init_done gates the curriculum so the very first reset doesn't promote.
+        self.ep_len_buf = torch.zeros(self.B, dtype=torch.long, device=self.device)
+        self.init_done = False
+        self.max_episode_length_s = float(cfg.episode_length_s)
+        self.max_episode_length = int(math.ceil(self.max_episode_length_s / cfg.dt))
 
 
         # thigh - upper leg; calf - lower leg
@@ -135,11 +144,14 @@ class RealQuadEnv:
         assert self.sim is not None, "create_sim failed"
 
         # ===== Terrain / ground: one shared surface, chosen by cfg switch =====
-        if self.cfg.use_complex_terrain:
-            print("[Terrain] use_complex_terrain=True -> using random heightfield terrain")
+        if self.cfg.terrain_type == "rudin":
+            print("[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape")
+            self.terrain = create_rudin_terrain(self.gym, self.sim, self.cfg.rudin_terrain, self.B)
+        elif self.cfg.terrain_type == "rough":
+            print("[Terrain] terrain_type='rough' -> using random heightfield terrain")
             self.terrain = create_random_rough_terrain(self.gym, self.sim)
         else:
-            print("[Terrain] use_complex_terrain=False -> using flat ground plane")
+            print("[Terrain] terrain_type='flat' -> using flat ground plane")
             self.terrain = create_ground_plane(self.gym, self.sim)
 
         # Precompute device-side height samples (meters) for spawn-height lookup.
@@ -300,6 +312,13 @@ class RealQuadEnv:
             self.actor_handles.append(actor_handle)
             actor_index = self.gym.get_actor_index(env_ptr, actor_handle, gymapi.DOMAIN_SIM)
             self.actor_indices.append(actor_index)
+
+        # Rudin terrain: override the env-grid origins with the curriculum-grid placement
+        # (terrain_levels = difficulty rows, terrain_types = terrain-type columns). Runs before
+        # the first reset so _sample_spawn_xy caches these origins as the spawn points.
+        if self.cfg.terrain_type == "rudin" and self.terrain is not None \
+                and getattr(self.terrain, "env_origins", None) is not None:
+            self._assign_rudin_origins()
 
         #self.actor_indices_t = torch.as_tensor(self.actor_indices, device=self.device, dtype=torch.long)
         self.actor_indices_t = torch.as_tensor(self.actor_indices, device=self.device, dtype=torch.int32)
@@ -529,7 +548,18 @@ class RealQuadEnv:
         dev = self.device
         n = env_ids.numel()
         cfg = self.cfg
-        if cfg.rand_cmd:
+        if getattr(cfg, "terrain_type", "flat") == "rudin":
+            # Rudin-matched omnidirectional command (fair comparison): vx, vy, yaw drawn from the
+            # rudin_cmd_* ranges, then zero tiny planar commands so "stand still" is a valid target
+            # (mirrors legged_robot._resample_commands' deadband).
+            rx, ry, rw = cfg.rudin_cmd_lin_vel_x, cfg.rudin_cmd_lin_vel_y, cfg.rudin_cmd_ang_vel_yaw
+            vx  = torch.empty(n, device=dev).uniform_(float(rx[0]), float(rx[1]))
+            vy  = torch.empty(n, device=dev).uniform_(float(ry[0]), float(ry[1]))
+            yaw = torch.empty(n, device=dev).uniform_(float(rw[0]), float(rw[1]))
+            keep = (torch.sqrt(vx * vx + vy * vy) > float(cfg.rudin_cmd_deadband)).to(vx.dtype)
+            vx = vx * keep
+            vy = vy * keep
+        elif cfg.rand_cmd:
             vx  = torch.empty(n, device=dev).uniform_(cfg.vx_min,  cfg.vx_max)
             vy  = torch.empty(n, device=dev).uniform_(cfg.vy_min,  cfg.vy_max)
             yaw = torch.empty(n, device=dev).uniform_(cfg.yaw_min, cfg.yaw_max)
@@ -562,6 +592,56 @@ class RealQuadEnv:
             self.swing_height_B = torch.full((self.B,), self.cfg.swing_height, device=self.device)
         self.swing_height_B[env_ids] = self.cfg.swing_height
 
+    def _assign_rudin_origins(self):
+        """Place robots on the Rudin curriculum grid (mirrors legged_gym _get_env_origins):
+        random difficulty level (<= max_init_terrain_level) and terrain type spread evenly
+        across the columns. Overrides self.env_origins with the per-robot cell origins."""
+        cfg = self.cfg.rudin_terrain
+        grid = torch.as_tensor(self.terrain.env_origins, device=self.device, dtype=torch.float32)  # (R,C,3)
+        max_init = cfg.max_init_terrain_level if cfg.curriculum else cfg.num_rows - 1
+        max_init = int(min(max_init, cfg.num_rows - 1))
+        self.terrain_levels = torch.randint(0, max_init + 1, (self.B,), device=self.device)
+        self.terrain_types = torch.div(
+            torch.arange(self.B, device=self.device),
+            (self.B / cfg.num_cols),
+            rounding_mode="floor",
+        ).long().clamp(0, cfg.num_cols - 1)
+        # Persist the full grid + difficulty ceiling so the dynamic curriculum can re-index origins
+        # after promote/demote (mirrors legged_gym's self.terrain_origins / self.max_terrain_level).
+        self.terrain_origins = grid                 # (R,C,3)
+        self.max_terrain_level = int(cfg.num_rows)
+        self.env_origins[:] = grid[self.terrain_levels, self.terrain_types]
+
+    def _update_terrain_curriculum(self, env_ids):
+        """Rudin's game-inspired curriculum (port of legged_gym _update_terrain_curriculum).
+
+        Called for each env being reset (fall or episode timeout), before respawn. Promotes a robot
+        one difficulty row if it walked more than half a cell from its origin, demotes it if it
+        covered less than half the distance its command implies over an episode, recycles robots that
+        clear the hardest row to a random row, then re-indexes env_origins to the new cell.
+        """
+        # Don't change difficulty on the very first reset (origins still being established).
+        if not self.init_done:
+            return
+        cfg = self.cfg.rudin_terrain
+        # distance walked from the (fixed) cell origin this episode
+        distance = torch.norm(self.base_pos[env_ids, 0:2] - self.env_origins[env_ids, 0:2], dim=1)
+        # robots that walked far enough progress to harder terrain
+        move_up = distance > cfg.terrain_length / 2
+        # robots that covered less than half their commanded distance go to simpler terrain
+        cmd_speed = torch.norm(self.cmd_rand[env_ids, 0:2], dim=1)
+        move_down = (distance < cmd_speed * self.max_episode_length_s * 0.5) & (~move_up)
+        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
+        # robots that solve the last level are sent to a random one (else clamp at >= 0)
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0),
+        )
+        self.env_origins[env_ids] = self.terrain_origins[
+            self.terrain_levels[env_ids], self.terrain_types[env_ids]
+        ]
+
     def _terrain_height(self, xy):
         """World (N,2) -> shared-terrain surface height z (N,). Flat plane -> zeros."""
         if getattr(self, "height_samples", None) is None:
@@ -583,7 +663,16 @@ class RealQuadEnv:
         cfg = self.cfg
         if not hasattr(self, "spawn_xy"):
             self.spawn_xy = self.env_origins[:, 0:2].clone()
-        if getattr(cfg, "rand_spawn_xy", False):
+        if getattr(cfg, "terrain_type", "flat") == "rudin":
+            # Rudin placement: jitter around the assigned grid-cell origin each reset
+            # (matches legged_gym _reset_root_states' +-1 m offset). env_origins already
+            # holds the per-robot cell origins from _assign_rudin_origins().
+            n = env_ids.numel()
+            j = float(getattr(cfg, "rudin_spawn_jitter_m", 1.0))
+            base = self.env_origins[env_ids, 0:2]
+            self.spawn_xy[env_ids, 0] = base[:, 0] + torch.empty(n, device=dev).uniform_(-j, j)
+            self.spawn_xy[env_ids, 1] = base[:, 1] + torch.empty(n, device=dev).uniform_(-j, j)
+        elif getattr(cfg, "rand_spawn_xy", False):
             n = env_ids.numel()
             half = float(getattr(cfg, "spawn_area_half_m", 8.0))
             self.spawn_xy[env_ids, 0] = torch.empty(n, device=dev).uniform_(-half, half)
@@ -639,6 +728,7 @@ class RealQuadEnv:
         dev = self.device
 
         self.t = 0
+        self.ep_len_buf[:] = 0
         all_ids = self._as_env_ids(None)   # all envs
 
         # 1) Gait, 2) spawn pose (phase + yaw + terrain-aware placement),
@@ -721,6 +811,10 @@ class RealQuadEnv:
         p_foot0 = self.foot_positions()[0, :, 0:2].detach()
         self._stride_last_td_xy0[:] = p_foot0
 
+        # The initial (global) reset is done; from here on per-env resets may run the dynamic
+        # curriculum (legged_gym sets init_done at the end of construction for the same reason).
+        self.init_done = True
+
     # -------- New: local reset for partial envs only --------
     def reset_envs(self, env_ids):
         """
@@ -733,6 +827,13 @@ class RealQuadEnv:
             return
         dev = self.device
         n = env_ids.numel()
+
+        # 0) Rudin dynamic curriculum: promote/demote BEFORE respawning, using the distance walked
+        # this episode and the still-current (just-ended) command. Updates self.env_origins so the
+        # spawn helper below jitters around the new cell. Mirrors legged_gym reset_idx ordering.
+        if self.cfg.terrain_type == "rudin" and self.cfg.rudin_terrain.dynamic_curriculum:
+            self._update_terrain_curriculum(env_ids)
+        self.ep_len_buf[env_ids] = 0
 
         # 1) gait, 2) spawn pose (phase + yaw + terrain-aware placement),
         # 3) velocity command, 4) step frequency / swing height — same helpers as reset()
@@ -1207,6 +1308,7 @@ class RealQuadEnv:
             # Update prev_contact
             self.prev_contact_flags = c.unsqueeze(-1).clone()
         self.t += 1
+        self.ep_len_buf += 1
 
         # ===== Initial forward flip localization print (only watch env0) =====
         if DBG_INIT_FALL and (self.t <= DBG_INIT_FALL_STEPS) and (self.t % DBG_INIT_FALL_EVERY == 0):
@@ -1266,9 +1368,18 @@ class RealQuadEnv:
         fallen_tilt   = (torch.abs(self.roll) > 0.9) | (torch.abs(self.pitch) > 0.9)
         done = fallen_height | fallen_tilt                     # (B,)
 
+        # Episode timeout (Rudin dynamic curriculum only). Robots that neither fell nor finished are
+        # reset after max_episode_length steps so the curriculum can promote them. Kept all-False for
+        # flat/rough so plain-ground DiffSim training is unchanged (no timeouts, reset on fall only).
+        if self.cfg.terrain_type == "rudin" and self.cfg.rudin_terrain.dynamic_curriculum:
+            timed_out = self.ep_len_buf > self.max_episode_length      # (B,)
+        else:
+            timed_out = torch.zeros(self.B, dtype=torch.bool, device=self.device)
+
         obs = self.get_obs()
         extra = {
             "done": done,
+            "timeout": timed_out,
             "muN": torch.ones(self.B, device=self.device),
             "q_err_norm": torch.zeros(self.B, device=self.device),
         }
