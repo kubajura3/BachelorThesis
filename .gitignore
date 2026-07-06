@@ -31,6 +31,11 @@ ARCHITECTURE.md
 REFACTOR_PLAN.md
 RANDOMIZATION_AND_TERRAIN_CHANGES.md
 RUDIN_TERRAIN_INTEGRATION.md
+PERCEPTION_IMPLEMENTATION.md
+
+# ===== Perception visualiser output =====
+perception_viz_out/
+
 # ===== Editor / OS =====
 .vscode/
 .idea/

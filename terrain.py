@@ -29,6 +29,12 @@ class TerrainData:
     # Optional (num_rows, num_cols, 3) grid of per-cell spawn origins. Only populated
     # for the Rudin curriculum-grid terrain; None for flat / single-heightfield terrain.
     env_origins: object = None
+    # Optional WORLD-FRAME mesh (the exact geometry handed to PhysX), retained so the
+    # perception module can ray-cast the real surface (correct vertical stair faces).
+    # vertices: (N, 3) float32 already shifted by the mesh transform; triangles: (M, 3) int32.
+    # None for the flat ground plane (perception synthesises a flat quad).
+    vertices: object = None
+    triangles: object = None
 
 
 def _setup_physx_stable(sim_params, use_gpu=True):
@@ -153,13 +159,19 @@ def create_random_rough_terrain(gym, sim):
     )
     print("DEBUG 4: after add_triangle_mesh", flush=True)
 
-    # Retain the heightfield + scales/offsets so the env can sample surface height at any (x, y).
+    # Retain the heightfield + scales/offsets so the env can sample surface height at any (x, y),
+    # plus the WORLD-FRAME mesh (offset baked in) so perception ray-casts the exact PhysX surface.
+    world_vertices = vertices.astype(np.float32).copy()
+    world_vertices[:, 0] += tm_params.transform.p.x
+    world_vertices[:, 1] += tm_params.transform.p.y
     return TerrainData(
         height_field_raw=heightfield,
         horizontal_scale=horizontal_scale,
         vertical_scale=vertical_scale,
         x_offset=tm_params.transform.p.x,
         y_offset=tm_params.transform.p.y,
+        vertices=world_vertices,
+        triangles=triangles.astype(np.int32),
     )
 
 
@@ -363,6 +375,11 @@ def create_rudin_terrain(gym, sim, rudin_cfg, num_robots):
     )
     print("DEBUG 4: after add_triangle_mesh (rudin)", flush=True)
 
+    # World-frame mesh (offset baked in) for perception ray-casting; the trimesh already
+    # has proper vertical faces for stairs/steps thanks to slope_treshold.
+    world_vertices = terrain.vertices.astype(np.float32).copy()
+    world_vertices[:, 0] += tm_params.transform.p.x   # -border
+    world_vertices[:, 1] += tm_params.transform.p.y   # -border
     return TerrainData(
         height_field_raw=terrain.height_field_raw,
         horizontal_scale=rudin_cfg.horizontal_scale,
@@ -370,4 +387,6 @@ def create_rudin_terrain(gym, sim, rudin_cfg, num_robots):
         x_offset=-border,
         y_offset=-border,
         env_origins=terrain.env_origins,
+        vertices=world_vertices,
+        triangles=terrain.triangles.astype(np.int32),
     )

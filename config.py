@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field
 
+# PerceptionCfg is lightweight (stdlib dataclass only); importing it here does
+# NOT pull in torch/warp -- those load lazily only when use_perception is enabled.
+from perception.config import PerceptionCfg
+
 # ===============================
 # ⭐ Pure Paper Mode Switch
 # ===============================
@@ -71,6 +75,13 @@ class EnvCfg:
     # control
     use_gpu_pipeline: bool = True
     use_viewer: bool = False  # Render during training? True - render but much slower; False - no render
+
+    # perception (terrain vision) -- gated; blind training is unchanged when False.
+    # Gathers a forward depth image + a differentiable local height map each step
+    # (see perception/ and env.collect_perception). use_gpu_pipeline=True (the default)
+    # keeps the pose input zero-copy.
+    use_perception: bool = False
+    perception: PerceptionCfg = field(default_factory=PerceptionCfg)
     action_hold: int = 5      # 100 Hz control
 
     pd_kp: float = 60      # 60

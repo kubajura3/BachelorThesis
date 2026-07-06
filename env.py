@@ -457,7 +457,34 @@ class RealQuadEnv:
 
         self._stride_last_td_step0 = torch.full((4,), -10_000, device=self.device, dtype=torch.long)
 
+        # ===== Perception (optional, gated) =====
+        # Only build the terrain-perception collector when explicitly enabled, so the
+        # blind/flat SRBD path never imports the warp/torch-heavy perception code.
+        self.perception = None
+        if getattr(self.cfg, "use_perception", False):
+            from perception import PerceptionCollector  # lazy: pulls in Warp
+            if not getattr(self.cfg, "use_gpu_pipeline", False):
+                print("[perception] use_perception=True with use_gpu_pipeline=False: base pose will "
+                      "be uploaded host->device each step. Set use_gpu_pipeline=True for zero-copy.")
+            self.perception = PerceptionCollector(
+                self.terrain, self.cfg.perception, num_envs=self.B, device=str(self.device)
+            )
+            print(f"[perception] collector ready (B={self.B}, device={self.device}, "
+                  f"terrain_type={self.cfg.terrain_type}).")
 
+    def collect_perception(self):
+        """Gather terrain perception for the current robot poses.
+
+        Thin convenience wrapper: feeds the live root state (world position and
+        xyzw quaternion) to the perception collector. Requires
+        ``cfg.use_perception=True``.
+
+        Returns:
+            dict: ``depth_clean`` / ``depth_noisy`` / ``height_map`` / ``cam_pos``
+            / ``cam_quat`` (see :meth:`perception.collector.PerceptionCollector.collect`).
+        """
+        assert self.perception is not None, "cfg.use_perception must be True to collect perception"
+        return self.perception.collect(self.root_state[:, 0:3], self.root_state[:, 3:7])
 
     def _sanity_check_io(self):
         # Just do shape checking and debug printing
