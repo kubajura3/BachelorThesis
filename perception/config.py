@@ -47,6 +47,12 @@ class PerceptionCfg:
         hm_subtract_base_z: If True the sampler returns terrain height *relative*
             to the base (base_z - terrain_z), matching Rudin's height scan; if
             False it returns absolute world terrain height.
+        hm_loss_blur_cells: Gaussian blur sigma (in heightfield cells) of the
+            *smoothed* heightfield used by ``sample_points(smooth=True)`` for
+            loss terms. Bilinear grid_sample gradients are piecewise-constant
+            and spike at stair risers; blurring turns steps into ramps so the
+            terrain-slope gradient is informative. 0 disables (smooth field ==
+            exact field). The exact field always serves the observation path.
 
     Depth post-processing:
         normalize_depth: Scale the clipped depth to [0, 1] (divide by max_range).
@@ -80,6 +86,7 @@ class PerceptionCfg:
     hm_y_max: float = 0.5
     hm_res: float = 0.1
     hm_subtract_base_z: bool = True
+    hm_loss_blur_cells: float = 2.0
 
     # --- depth post-processing ---
     normalize_depth: bool = True
@@ -97,3 +104,4 @@ class PerceptionCfg:
         assert self.max_range > self.min_range >= 0.0, "require max_range > min_range >= 0"
         assert self.hm_x_max > self.hm_x_min and self.hm_y_max > self.hm_y_min, "bad height-map extent"
         assert self.hm_res > 0.0, "height-map resolution must be positive"
+        assert self.hm_loss_blur_cells >= 0.0, "hm_loss_blur_cells must be >= 0"

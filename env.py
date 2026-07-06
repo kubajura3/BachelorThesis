@@ -461,6 +461,10 @@ class RealQuadEnv:
         # Only build the terrain-perception collector when explicitly enabled, so the
         # blind/flat SRBD path never imports the warp/torch-heavy perception code.
         self.perception = None
+        if getattr(self.cfg, "use_height_obs", False) or getattr(self.cfg, "use_terrain_loss", False):
+            assert getattr(self.cfg, "use_perception", False), (
+                "use_height_obs / use_terrain_loss require use_perception=True"
+            )
         if getattr(self.cfg, "use_perception", False):
             from perception import PerceptionCollector  # lazy: pulls in Warp
             if not getattr(self.cfg, "use_gpu_pipeline", False):
@@ -485,6 +489,30 @@ class RealQuadEnv:
         """
         assert self.perception is not None, "cfg.use_perception must be True to collect perception"
         return self.perception.collect(self.root_state[:, 0:3], self.root_state[:, 3:7])
+
+    @property
+    def obs_dim(self):
+        """Observation dimension: 36 blind, +n height points when use_height_obs."""
+        dim = 36
+        if getattr(self.cfg, "use_height_obs", False):
+            dim += self.perception.height_sampler.num_points
+        return dim
+
+    def terrain_height_diff(self, xy, smooth=True):
+        """Differentiable terrain height at world (B, N, 2) points -> (B, N).
+
+        Gradient-carrying sibling of :meth:`_terrain_height` (which rounds to the
+        nearest cell and is grad-free): samples the perception heightfield with
+        bilinear ``grid_sample``, so terrain slope back-propagates into ``xy``.
+        Feed SRBD-predicted base/foot positions from the training loop.
+
+        Args:
+            xy: (B, N, 2) world-frame query points, metres.
+            smooth: Use the Gaussian-blurred loss field (default; see
+                ``PerceptionCfg.hm_loss_blur_cells``) instead of the exact one.
+        """
+        assert self.perception is not None, "cfg.use_perception must be True for terrain_height_diff"
+        return self.perception.height_sampler.sample_points(xy, smooth=smooth)
 
     def _sanity_check_io(self):
         # Just do shape checking and debug printing
@@ -1468,6 +1496,19 @@ class RealQuadEnv:
 
         # Total dimension: 3(cmd) + 8(phase) + 3(v_b) + 4(q) + 3(w_b) + 12(q_delta) + 3(g_proj) = 36
         obs = torch.cat([cmd, sincos, v_b, q_wxyz, w_b, q_delta, g_proj], dim=-1)  # (B,36)
+
+        # Optional Rudin-style height scan: 187 local terrain heights relative to the
+        # base (hm_subtract_base_z=True), centred on the nominal height and clipped to
+        # +-1 m so it is roughly zero-mean when standing on flat ground. Sampled at the
+        # Isaac root state -- the obs is an input leaf (whole method is no_grad); the
+        # gradient path to the terrain lives in the loss terms, not here.
+        if getattr(cfg, "use_height_obs", False):
+            root = self.root_state
+            qx, qy, qz, qw = root[:, 3], root[:, 4], root[:, 5], root[:, 6]  # xyzw
+            yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+            hm = self.perception.height_sampler.sample(root[:, 0:3], yaw)    # (B, n_pts)
+            obs = torch.cat([obs, torch.clip(hm - cfg.h0, -1.0, 1.0)], dim=-1)
+
         return obs
 
 # ---------------- Training ----------------

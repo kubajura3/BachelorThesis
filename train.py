@@ -33,7 +33,8 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 
 def train(num_iters=1000, steps_per_iter=24,
           device="cuda" if torch.cuda.is_available() else "cpu",
-          seed: int = None, smooth_k: int = 25):
+          seed: int = None, smooth_k: int = 25,
+          perception_terrain: bool = False):
 
     if seed is None: seed = int(os.getenv("SEED", 0))
     set_seed(seed)
@@ -45,16 +46,26 @@ def train(num_iters=1000, steps_per_iter=24,
     cfg.vx_max = +0.5
     cfg.train_no_aerial = True
 
+    # Perception / hard-terrain training: Rudin curriculum terrain, 36+187-D obs
+    # (height scan) and the terrain-aware differentiable losses (terrain-relative
+    # height + swing-foot clearance sampled at SRBD-predicted positions).
+    if perception_terrain:
+        cfg.terrain_type = "rudin"
+        cfg.use_perception = True
+        cfg.use_height_obs = True
+        cfg.use_terrain_loss = True
 
     if PURE_PAPER_MODE:
         cfg.use_paper_raibert = True
 
     env = RealQuadEnv(cfg, device=device)
     B = env.B
-    model = Policy(dim_obs=36, dim_action=12).to(device)
+    model = Policy(dim_obs=env.obs_dim, dim_action=12).to(device)
     opt = AdamW(model.parameters(), lr=1e-3)  # Further reduce learning rate
     
     a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01 ,0.5, 5.0
+    a7 = 3.0   # swing-foot terrain-clearance weight (only used with cfg.use_terrain_loss)
+    use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
      
   
 
@@ -68,6 +79,7 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_ctrl_hist_iter = []
     loss_gproj_hist_iter = []
     loss_foot_hist_iter = []
+    loss_clear_hist_iter = []
 
     # Outer loop
     for it in pbar:
@@ -97,6 +109,7 @@ def train(num_iters=1000, steps_per_iter=24,
         ureg_hist = []
         omega_hist, gproj_hist = [], []
         foot_ref_hist = []
+        clearance_hist = []
         tilt_hist = []
         cmd_hist = []       # ★ Record high-level velocity command at each step [vx_cmd, vy_cmd, yaw_cmd]
         
@@ -197,9 +210,23 @@ def train(num_iters=1000, steps_per_iter=24,
                 env.srbd_v = env.base_lin + alpha * (env.srbd_v - env.srbd_v.detach())
                 env.srbd_p = env.srbd_p.clone()
                 env.srbd_p[:,2] = env.base_pos[:,2] + alpha * (env.srbd_p[:,2] - env.srbd_p[:,2].detach())
+                if use_terrain_loss:
+                    # Terrain is sampled at srbd_p xy, so pin its *value* to the real
+                    # (Isaac) position while keeping the SRBD gradient corridor -- else
+                    # the SRBD xy drifts and the loss reads terrain at the wrong spot.
+                    # The strict branch above already aligns the full position.
+                    env.srbd_p[:, :2] = env.base_pos[:, :2] + alpha * (
+                        env.srbd_p[:, :2] - env.srbd_p[:, :2].detach()
+                    )
 
             v_hat3 = env.srbd_v.clone()           # (B,3)
             pz_hat = env.srbd_p[:, 2]            # (B,)
+            if use_terrain_loss:
+                # Terrain-relative base height: (pz - terrain_z) is compared to h0 in
+                # loss_h / r_stab below. terrain_z is sampled differentiably at the
+                # SRBD xy, so the local terrain slope back-props into the policy.
+                terr_z = env.terrain_height_diff(env.srbd_p[:, :2].unsqueeze(1)).squeeze(1)  # (B,)
+                pz_hat = pz_hat - terr_z
 
             v_world_hist.append(v_hat3.clone())
             q_body_hist.append(env.srbd_q.clone())
@@ -212,6 +239,16 @@ def train(num_iters=1000, steps_per_iter=24,
             p_foot_srbd = env.srbd.foot_positions_srbd(qref)  # (B,4,3)
             foot_err_vec = (p_foot_srbd - pref) * swing_mask
             foot_ref_hist.append(foot_err_vec.clone())
+
+            if use_terrain_loss:
+                # Swing-foot clearance: penalise swing feet below terrain + margin.
+                # foot_tz is sampled (blurred field) at the differentiable SRBD foot
+                # xy, so the gradient both lifts the foot (z) and pushes the foothold
+                # away from riser edges (xy, via the terrain slope).
+                foot_tz = env.terrain_height_diff(p_foot_srbd[..., :2])       # (B,4)
+                clear_margin = h_tar.view(B, 1)                                # swing apex target
+                clear_viol = torch.relu(foot_tz + clear_margin - p_foot_srbd[..., 2])
+                clearance_hist.append(clear_viol * swing_mask.squeeze(-1))     # (B,4)
 
             # Angular velocity (body frame) — env.srbd_w is already in body frame
             omega_hist.append(env.srbd_w.clone())
@@ -361,6 +398,12 @@ def train(num_iters=1000, steps_per_iter=24,
         else:
             loss_foot = torch.tensor(0.0, device=device)
 
+        if clearance_hist:
+            clear_seq = torch.stack(clearance_hist)    # (T,B,4)
+            loss_clearance = (clear_seq ** 2).mean()
+        else:
+            loss_clearance = torch.tensor(0.0, device=device)
+
         yaw_w = 0.1
         loss = (a1*loss_v +
                 a2*loss_h +
@@ -368,6 +411,7 @@ def train(num_iters=1000, steps_per_iter=24,
                 a4*loss_ctrl +
                 a5*loss_gproj +
                 a6*loss_foot  +
+                a7*loss_clearance +
                 yaw_w * loss_yaw
                 )
 
@@ -411,6 +455,7 @@ def train(num_iters=1000, steps_per_iter=24,
         loss_ctrl_hist_iter.append(float(loss_ctrl.detach().cpu()))
         loss_gproj_hist_iter.append(float(loss_gproj.detach().cpu()))
         loss_foot_hist_iter.append(float(loss_foot.detach().cpu()))
+        loss_clear_hist_iter.append(float(loss_clearance.detach().cpu()))
 
         vx_iter_track.append(vx_for_plot)
         losses.append(loss.item()); rewards.append(episodic_reward)
@@ -443,6 +488,7 @@ def train(num_iters=1000, steps_per_iter=24,
         "loss_ctrl":  np.array(loss_ctrl_hist_iter,  dtype=np.float32),
         "loss_gproj": np.array(loss_gproj_hist_iter, dtype=np.float32),
         "loss_foot":  np.array(loss_foot_hist_iter,  dtype=np.float32),
+        "loss_clear": np.array(loss_clear_hist_iter, dtype=np.float32),
     }
 
     for name, arr in loss_parts.items():
@@ -482,7 +528,7 @@ def train(num_iters=1000, steps_per_iter=24,
 
     wrapper = PolicyActOnly(model).to(device)
 
-    example_obs = torch.zeros(1, 36, device=device)  # Your DiffSim obs_dim=36
+    example_obs = torch.zeros(1, env.obs_dim, device=device)  # 36 blind, 36+187 with height obs
     traced = torch.jit.trace(wrapper, example_obs)
     traced.save(out("quad_diffsim_srbd_align_multi_robot.pt"))
     print(f"✅ Saved TorchScript: {out('quad_diffsim_srbd_align_multi_robot.pt')}")
@@ -491,5 +537,7 @@ def train(num_iters=1000, steps_per_iter=24,
     print("✅ Training done (MULTI robot SRBD + α-align, Eq.(5) loss, body-frame vx tracking).")
     
 if __name__ == "__main__":
-    train(num_iters=1000, steps_per_iter=24, seed=0)
+    # perception_terrain=True -> Rudin terrain + height-map obs + terrain losses
+    train(num_iters=1000, steps_per_iter=24, seed=0,
+          perception_terrain=os.getenv("PERCEPTION_TERRAIN", "0") == "1")
 

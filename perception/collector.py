@@ -120,11 +120,13 @@ class PerceptionCollector:
         self._warned_transfer = False
 
         # Normalise the env terrain (or flat) into a single field description.
-        self.field = (
-            TerrainField.from_terrain_data(terrain_data)
-            if terrain_data is not None
-            else TerrainField.flat()
-        )
+        # An already-built TerrainField (visualiser / tests) passes straight through.
+        if terrain_data is None:
+            self.field = TerrainField.flat()
+        elif isinstance(terrain_data, TerrainField):
+            self.field = terrain_data
+        else:
+            self.field = TerrainField.from_terrain_data(terrain_data)
 
         # Terrain mesh for the camera (keep references alive).
         self._mesh, self._mesh_ids = build_warp_mesh(self.field, device=self.device)

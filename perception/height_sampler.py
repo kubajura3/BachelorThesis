@@ -14,11 +14,36 @@ cols<->y); the only difference is bilinear interpolation instead of rounding.
 Everything is a single fused torch op, GPU-resident, no host transfer.
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 
 from .config import PerceptionCfg
 from .terrain_mesh import TerrainField
+
+
+def _gaussian_blur_2d(img: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable Gaussian blur of a (1, 1, H, W) image, replicate-padded.
+
+    Args:
+        img: (1, 1, H, W) float tensor.
+        sigma: Gaussian standard deviation in pixels (> 0).
+
+    Returns:
+        (1, 1, H, W) blurred tensor on the same device/dtype.
+    """
+    radius = max(1, int(math.ceil(3.0 * sigma)))
+    x = torch.arange(-radius, radius + 1, dtype=img.dtype, device=img.device)
+    kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+    kernel = kernel / kernel.sum()
+    k_row = kernel.view(1, 1, 1, -1)
+    k_col = kernel.view(1, 1, -1, 1)
+    out = F.pad(img, (radius, radius, 0, 0), mode="replicate")
+    out = F.conv2d(out, k_row)
+    out = F.pad(out, (0, 0, radius, radius), mode="replicate")
+    out = F.conv2d(out, k_col)
+    return out
 
 
 class TerrainHeightSampler:
@@ -46,6 +71,14 @@ class TerrainHeightSampler:
         self.rows, self.cols = hf.shape
         self.heightfield = hf.view(1, 1, self.rows, self.cols)
 
+        # Smoothed copy for the loss path (see PerceptionCfg.hm_loss_blur_cells):
+        # blurring turns stair risers into ramps so grid_sample's bilinear
+        # gradient carries a usable terrain slope instead of a one-cell spike.
+        if cfg.hm_loss_blur_cells > 0.0:
+            self.heightfield_smooth = _gaussian_blur_2d(self.heightfield, cfg.hm_loss_blur_cells)
+        else:
+            self.heightfield_smooth = self.heightfield
+
         self.grid_points = self._init_grid_points()  # (n_pts, 2) body-frame x,y
         self.num_points = self.grid_points.shape[0]
 
@@ -66,6 +99,58 @@ class TerrainHeightSampler:
         self.grid_shape = (xs.shape[0], ys.shape[0])  # (nx, ny)
         gx, gy = torch.meshgrid(xs, ys, indexing="ij")
         return torch.stack([gx.reshape(-1), gy.reshape(-1)], dim=-1)  # (n_pts, 2)
+
+    def _sample_field(self, world_x: torch.Tensor, world_y: torch.Tensor, smooth: bool) -> torch.Tensor:
+        """Bilinearly sample the heightfield at world-frame (x, y) points.
+
+        Shared core of :meth:`sample` and :meth:`sample_points`: maps world
+        coordinates to fractional heightfield indices (same convention as
+        ``env._terrain_height``: rows along x, cols along y) and reads the field
+        with ``F.grid_sample``. Differentiable in ``world_x`` / ``world_y``.
+
+        Args:
+            world_x: (B, N) world x coordinates, metres.
+            world_y: (B, N) world y coordinates, metres.
+            smooth: Sample the Gaussian-blurred loss-path field instead of the
+                exact one.
+
+        Returns:
+            (B, N) terrain heights, metres.
+        """
+        B, N = world_x.shape
+        i_idx = (world_x - self.x_offset) / self.horizontal_scale
+        j_idx = (world_y - self.y_offset) / self.horizontal_scale
+
+        # Fractional indices -> grid_sample coords in [-1, 1] (align_corners=True):
+        # width axis maps to columns (j), height axis to rows (i).
+        gx = 2.0 * j_idx / max(self.cols - 1, 1) - 1.0
+        gy = 2.0 * i_idx / max(self.rows - 1, 1) - 1.0
+        grid = torch.stack([gx, gy], dim=-1).view(B, N, 1, 2)
+
+        field = self.heightfield_smooth if smooth else self.heightfield
+        field = field.expand(B, -1, -1, -1)  # (B,1,rows,cols), no copy
+        sampled = F.grid_sample(
+            field, grid, mode="bilinear", padding_mode="border", align_corners=True
+        )
+        return sampled.view(B, N)
+
+    def sample_points(self, world_xy: torch.Tensor, smooth: bool = True) -> torch.Tensor:
+        """Sample terrain height at arbitrary world-frame points.
+
+        Differentiable in ``world_xy`` -- this is the loss-path entry point: feed
+        SRBD-predicted base/foot positions and the terrain slope flows back as a
+        gradient. Defaults to the blurred field for well-behaved gradients on
+        stepped terrain (the exact field's bilinear gradient is zero on flat
+        treads and a spike at risers).
+
+        Args:
+            world_xy: (B, N, 2) world-frame (x, y) query points, metres.
+            smooth: Use the Gaussian-blurred loss field (default) or the exact one.
+
+        Returns:
+            (B, N) absolute world terrain heights, metres.
+        """
+        return self._sample_field(world_xy[..., 0], world_xy[..., 1], smooth=smooth)
 
     def sample(self, base_pos: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
         """Sample terrain height on the yaw-aligned grid around each robot.
@@ -95,22 +180,7 @@ class TerrainHeightSampler:
         world_x = base_xy[:, 0:1] + px * cos_y - py * sin_y   # (B, n_pts)
         world_y = base_xy[:, 1:2] + px * sin_y + py * cos_y
 
-        # World -> fractional heightfield indices (row index along x, col along y),
-        # same convention as env._terrain_height.
-        i_idx = (world_x - self.x_offset) / self.horizontal_scale
-        j_idx = (world_y - self.y_offset) / self.horizontal_scale
-
-        # Fractional indices -> grid_sample coords in [-1, 1] (align_corners=True):
-        # width axis maps to columns (j), height axis to rows (i).
-        gx = 2.0 * j_idx / max(self.cols - 1, 1) - 1.0
-        gy = 2.0 * i_idx / max(self.rows - 1, 1) - 1.0
-        grid = torch.stack([gx, gy], dim=-1).view(B, self.num_points, 1, 2)
-
-        heightfield = self.heightfield.expand(B, -1, -1, -1)  # (B,1,rows,cols), no copy
-        sampled = F.grid_sample(
-            heightfield, grid, mode="bilinear", padding_mode="border", align_corners=True
-        )
-        terrain_z = sampled.view(B, self.num_points)
+        terrain_z = self._sample_field(world_x, world_y, smooth=False)
 
         if self.cfg.hm_subtract_base_z:
             return base_pos[:, 2:3] - terrain_z

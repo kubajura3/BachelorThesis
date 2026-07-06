@@ -82,6 +82,13 @@ class EnvCfg:
     # keeps the pose input zero-copy.
     use_perception: bool = False
     perception: PerceptionCfg = field(default_factory=PerceptionCfg)
+    # Append the 187-point local height map to the observation (obs 36 -> 36+187).
+    # Requires use_perception=True. Policies must be built with dim_obs=env.obs_dim.
+    use_height_obs: bool = False
+    # Enable the terrain-aware differentiable loss terms in train.py (terrain-relative
+    # height + swing-foot clearance, sampled at SRBD-predicted positions so the terrain
+    # slope back-propagates into the policy). Requires use_perception=True.
+    use_terrain_loss: bool = False
     action_hold: int = 5      # 100 Hz control
 
     pd_kp: float = 60      # 60
