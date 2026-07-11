@@ -1,6 +1,16 @@
+"""Gait planning: phase-based stance/swing scheduling and foot targets.
+
+``GaitPlanner`` turns the per-leg gait phase into stance/swing masks (duty
+factor per gait), plans swing-foot trajectories (quadratic parabola between
+liftoff and a Raibert-style touchdown point), and derives per-env step
+frequency / swing height from the velocity command. The stance/swing and
+touchdown formulations follow the standard legged-locomotion textbook
+treatment (duty factor, Raibert heuristic).
+"""
+
 import math
 
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi
 except Exception:
@@ -10,25 +20,38 @@ import torch
 
 
 class GaitPlanner:
+    """Gait scheduling and foot-target generation for a batch of robots.
+
+    Like :class:`srbd.SRBDModel`, this class holds no state of its own: it
+    proxies attribute access onto the wrapped ``env`` so all gait state
+    (``phase``, ``step_freq_B``, ``last_contact_*`` caches, ...) lives in
+    ``RealQuadEnv``'s namespace. It is a mixin split into its own file.
+    """
+
     def __init__(self, env):
+        """Wrap the environment whose state this planner reads and writes."""
         object.__setattr__(self, 'env', env)
 
     def __getattr__(self, name):
+        """Resolve unknown attributes on the wrapped env (shared state namespace)."""
         return getattr(self.env, name)
 
     def __setattr__(self, name, value):
+        """Write attributes onto the wrapped env (except the ``env`` reference itself)."""
         if name == 'env':
             object.__setattr__(self, name, value)
         else:
             setattr(self.env, name, value)
 
     def _update_gait_from_cmd(self):
-        """
-        Fixed stride length + frequency follows velocity command (batch B version)
-        - Use velocity magnitude of cmd_rand[:,0:2] as |v_cmd|
-        - Set a fixed hip->landing distance L_land (m) for each gait
-        - Derive f from Raibert formula delta = |v|/(4f) => f = |v|/(4*L_land)
-        - Clamp to [step_freq_min, step_freq_max], and apply deadzone & rough terrain scaling
+        """Derive per-env step frequency and swing height from the velocity command.
+
+        Only active when ``cfg.step_freq_from_cmd`` is set (fixed-stride mode):
+        each gait gets a nominal hip-to-landing distance ``L_land``, and the
+        Raibert relation ``delta = |v| / (4 f)`` is inverted to give
+        ``f = |v| / (4 L_land)``, clamped to ``[step_freq_min, step_freq_max]``.
+        Also maintains ``move_mask_B`` (whether the phase should advance at all,
+        based on the command deadzone) and a speed-scaled swing height.
         """
         if not getattr(self.cfg, "step_freq_from_cmd", False):
             return
@@ -37,19 +60,12 @@ class GaitPlanner:
         B = self.B
         cfg = self.cfg
 
-        # -------- Velocity command (you already maintain cmd_rand / vx_star) --------
-        if not hasattr(self, "cmd_rand"):
-            # Fallback: only use vx_star
-            v_cmd_xy = torch.stack([self.vx_star, torch.zeros_like(self.vx_star)], dim=-1)
-        else:
-            v_cmd_xy = self.cmd_rand[:, 0:2]  # (B,2) in body frame (your convention)
-        v_mag = torch.linalg.norm(v_cmd_xy, dim=1)  # (B,)
-        v_hi = max(0.20, float(getattr(cfg, "vx_max", 0.5)))  # For normalization
+        v_hi = max(0.20, float(getattr(cfg, "vx_max", 0.5)))  # normalisation ceiling
 
-        # -------- gait_id (B,) --------
         gait_ids = getattr(self, "gait_ids", torch.ones(B, dtype=torch.long, device=dev)).to(dev)
 
-        # -------- deadzone --------
+        # Command magnitudes and deadzone: a significant linear OR yaw command
+        # means the robot should be stepping (phase advances).
         dead = float(getattr(cfg, "cmd_deadzone", 0.05))  # m/s
         yaw_dead = float(getattr(cfg, "yaw_deadzone", dead))
 
@@ -60,42 +76,35 @@ class GaitPlanner:
             v_mag = torch.abs(self.vx_star)
             yaw_mag = torch.zeros_like(v_mag)
 
-        # As long as “velocity or turning” is significant, consider it needs stepping/advancing phase
         self.move_mask_B = ((v_mag >= dead) | (yaw_mag >= yaw_dead)).float()   # (B,)
 
-        # -------- Fixed stride table: L_land here is “hip to landing point” forward distance (m) --------
-        # You can adjust based on your feel; these values around 0.06~0.09m work well (corresponding to stride ~2*L_land magnitude)
+        # Per-gait nominal hip-to-landing distance (m); stride is ~2 * L_land.
         L_table = torch.tensor(
-            #[0.0, 0.08, 0.065, 0.055, 0.085],   # Already tuned version
-            [0.0, 0.08, 0.065, 0.055, 0.085],   #0.12
+            [0.0, 0.08, 0.065, 0.055, 0.085],
             dtype=torch.float32, device=dev
         )
         L_land = L_table[gait_ids].clamp(min=1e-3)  # (B,)
 
-        # -------- rough terrain scaling (conservative: smaller step, slightly lower freq, higher lift) --------
+        # Rough-terrain scaling: shorter stride, more conservative frequency.
         rough = 0.0 if getattr(cfg, "terrain_type", "flat") == "flat" else 1.0
-        L_land = L_land * (1.0 - 0.10 * rough)               # Stride shorter
-        freq_scale = (1.0 - 0.15 * rough)                    # Frequency more conservative (lower)
-        #height_scale = (1.0 + 0.40 * rough)                  # Lift higher
-        height_scale = 1.0                 # Lift higher
+        L_land = L_land * (1.0 - 0.10 * rough)
+        freq_scale = (1.0 - 0.15 * rough)
+        height_scale = 1.0
 
-        # -------- Derive f from fixed stride: delta ≈ |v|/(4f)  =>  f ≈ |v|/(4*L_land) --------
+        # Invert the Raibert stride relation: delta = |v|/(4f)  =>  f = |v|/(4 L_land).
         f_raw = (v_mag / (4.0 * L_land + 1e-6)) * freq_scale
 
         fmin = float(cfg.step_freq_min)
         fmax = float(cfg.step_freq_max)
         f = torch.clamp(f_raw, fmin, fmax)
 
-        # deadzone: at low speed don't force “fixed stride”, just give minimum frequency + very small lift
+        # Inside the deadzone don't force a stride: minimum frequency, small lift.
         f = torch.where(v_mag < dead, torch.full((B,), fmin, device=dev), f)
         self.step_freq_B = f
 
-        # -------- swing height: rises with speed + rough gain + deadzone reduction --------
+        # Swing height rises with speed (h_max is clamped to at least h0 so the
+        # interpolation below can never lower the lift under the configured default).
         h0 = float(cfg.swing_height)
-        #h_max = float(getattr(cfg, “swing_height_max”, 0.11))
-        #h_max = float(getattr(cfg, “swing_height_max”, 0.015))
-
-        # ✅ Fix: ensure h_max >= h0, and give reasonable default (0.05)
         h_max = float(getattr(cfg, "swing_height_max", 0.05))
         h_max = max(h_max, h0)
         s = torch.clamp(v_mag / (v_hi + 1e-6), 0.0, 1.0)
@@ -103,21 +112,36 @@ class GaitPlanner:
         h = torch.where(v_mag < dead, torch.full((B,), 0.5 * h0, device=dev), h)
         self.swing_height_B = h
 
-
     @torch.no_grad()
-
     def _swing_parabola(self, p0, pm, p1, s):
+        """Quadratic interpolation through (p0 at s=0, pm at s=0.5, p1 at s=1).
+
+        Used for the swing-foot trajectory: start at the liftoff point, apex at
+        the midpoint raised by the swing height, land at the touchdown target.
+        All arguments broadcast; ``s`` is the swing progress in [0, 1].
+        """
         c = p0
         b = 4*(pm - (p0 + p1)/2.0)
         a = p1 - p0 - b
         return a*(s**2) + b*s + c
 
-    # ---------------- swing trajectory (currently used version)----------------
-    # Calculate foot target position based on velocity command and gait phase - equivalent to main function for foot trajectory generation
-
     def _update_foot_targets_from_command(self, phases, p_foot_now, return_vref: bool = False):
-        """
-        Strict Fig 9.2/9.3: stance/swing defined by duty factor β; running/bound/gallop allow aerial phase
+        """Compute per-foot PD targets and the stance mask for the current phase.
+
+        The main foot-trajectory entry point, called once per control step.
+        Stance/swing is defined strictly by the duty factor (running gaits may
+        have an aerial phase): stance feet are locked to their last touchdown
+        position in the world frame; swing feet follow a quadratic parabola
+        from the liftoff point to the Raibert touchdown target.
+
+        Args:
+            phases: (B, 4) absolute leg phases in radians.
+            p_foot_now: (B, 4, 3) current world-frame foot positions.
+            return_vref: Also return the (currently zero) foot reference
+                velocity, matching the training loop's call signature.
+
+        Returns:
+            (p_foot_target (B,4,3), stance_mask (B,4,1)[, vref (B,4,3)]).
         """
         dev, cfg, B = self.device, self.cfg, self.B
 
@@ -136,22 +160,22 @@ class GaitPlanner:
             w_phase=1.0,
             w_contact=0.0
         )  # (B,4,1)
-        swing_mask = 1.0 - stance_mask
 
-        # ---------- 2.5) Record liftoff moment start point (x0,y0,z0) ----------
-        # liftoff: previous frame is stance, this frame becomes swing
+        # ---------- 2.5) Record the liftoff start point (x0, y0, z0) ----------
+        # liftoff edge: previous frame stance, this frame swing.
         if not hasattr(self, "prev_stance_mask"):
             self.prev_stance_mask = torch.ones_like(stance_mask)
-        # Important: when rolling out multiple steps then backward, any “state cache” must detach + clone,
-        # and avoid in-place writes, otherwise autograd will report version mismatch
+        # When rolling out multiple steps before backward(), every state cache
+        # must be detached and cloned (no in-place writes into aliased storage),
+        # otherwise autograd reports a version mismatch.
         with torch.no_grad():
             liftoff = (self.prev_stance_mask > 0.5) & (stance_mask < 0.5)          # (B,4,1)
             liftoff3 = liftoff.expand(-1, -1, 3)                                   # (B,4,3)
             self.last_liftoff_xyz = torch.where(
                 liftoff3,
-                p_foot_now.detach(),                                               # ★ detach
+                p_foot_now.detach(),
                 self.last_liftoff_xyz
-            ).clone()                                                               # ★ clone (break storage alias)
+            ).clone()  # clone breaks the storage alias
 
 
         # ---------- 3) Get high-level command (vx, vy, yaw_rate) ----------
@@ -171,31 +195,15 @@ class GaitPlanner:
         yaw_rate_cmd  = torch.where(stop_env, torch.zeros_like(yaw_rate_cmd), yaw_rate_cmd)
 
         stance_mask = torch.where(stop3, torch.ones_like(stance_mask), stance_mask)
-        swing_mask  = 1.0 - stance_mask
 
-        # ---------- 4) body->world yaw rotation ----------
-        yaw = self.yaw
-        cy = torch.cos(yaw); sy = torch.sin(yaw)
-        R_yaw = torch.stack(
-            [torch.stack([cy, -sy], dim=-1),
-             torch.stack([sy,  cy], dim=-1)], dim=1
-        )  # (B,2,2)
-
-        v_cmd_world_xy = torch.einsum("bij,bj->bi", R_yaw, v_cmd_body_xy)  # (B,2)
-
-        # ---------- 5) STANCE branch (per Fig 9.2: stance foot stays fixed in world frame) ----------
-        # Lock directly to the most recent “touchdown moment” foot position (world frame)
-        # This way PD target won't drag the stance foot “backward”, significantly reducing slip/forward tilt
+        # ---------- 4) STANCE branch: stance foot stays fixed in the world frame ----------
+        # Lock to the most recent touchdown position so the PD target does not
+        # drag the stance foot backward (reduces slip and forward tilt).
         p_stance = p_foot_now.clone()
         p_stance[..., 0:2] = self.last_contact_xy
         p_stance[..., 2]   = self.last_contact_z
 
-
-        # ---------- 6) SWING branch: quadratic parabola ----------
-        dt = cfg.dt
-        step_freq = getattr(self, "step_freq_B", torch.full((B,), cfg.step_freq, device=dev))
-        T = 1.0 / step_freq
-
+        # ---------- 5) SWING branch: quadratic parabola ----------
         _, p_land_xy_world = self._raibert_touchdown_world(phases)   # (B,4,2)
 
         u = self._phase_u(phases)                                    # (B,4)
@@ -229,32 +237,40 @@ class GaitPlanner:
         p_swing = self._swing_parabola(p0, pm, p1, s)                  # (B,4,3)
 
         v_foot_ref_world = torch.zeros_like(p_foot_now)
-        # ---------- 7) Blend ----------
+        # ---------- 6) Blend ----------
         p_foot_target = stance_mask * p_stance + (1.0 - stance_mask) * p_swing
 
         # stop env locks foot position
         p_foot_target = torch.where(stop3, p_foot_now, p_foot_target)
         stance_mask   = torch.where(stop3, torch.ones_like(stance_mask), stance_mask)
 
-        # ---------- 8) Update prev_stance_mask (for next frame liftoff detection) ----------
+        # ---------- 7) Update prev_stance_mask (for next frame's liftoff detection) ----------
         with torch.no_grad():
-            self.prev_stance_mask = stance_mask.detach().clone()              # ★ clone to avoid alias/version issues
+            self.prev_stance_mask = stance_mask.detach().clone()  # clone avoids alias/version issues
 
         if return_vref:
             return p_foot_target, stance_mask, v_foot_ref_world
         return p_foot_target, stance_mask
 
-    # Foothold calculation (body frame Raibert version) - aligned with textbook, used in _update_foot_targets_from_command: currently used foothold formula
-
     def _raibert_touchdown_world(self, phases: torch.Tensor):
-        """
-        Strictly aligned with textbook/Fig 9.6/9.7 touchdown:
-            p_land = p_hip(p) + v_now*(1-p)*T_swing + 0.5*T_stance*v_des + k*(v_now - v_des) + x_bias*fwd
-        - p (=swing_phase) is each leg's own swing progress
-        - v_now uses current estimated velocity (world), v_des comes from cmd (body->world)
+        """Raibert-style touchdown targets in the world frame.
+
+        The full textbook touchdown heuristic is
+
+            p_land = p_hip + v_now*(1-p)*T_swing + 0.5*T_stance*v_des
+                     + k*(v_des - v_now) + x_bias*fwd
+
+        where p is each leg's swing progress, v_now the current base velocity
+        (world) and v_des the commanded velocity (body -> world). The current
+        implementation keeps only the feed-forward term ``0.5*T_stance*v_des``
+        (the prediction, feedback and bias terms destabilised training; the
+        feedback gain ``cfg.k_raibert`` defaults to 0 accordingly).
+
+        Args:
+            phases: (B, 4) absolute leg phases in radians.
+
         Returns:
-            p_hip_xy_world  : (B,4,2)
-            p_land_xy_world : (B,4,2)
+            (p_hip_xy_world (B,4,2), p_land_xy_world (B,4,2)).
         """
         dev, cfg, B = self.device, self.cfg, self.B
 
@@ -262,16 +278,8 @@ class GaitPlanner:
         step_freq = getattr(self, "step_freq_B", torch.full((B,), cfg.step_freq, device=dev))
         T = 1.0 / step_freq                                    # (B,)
         T_stance = beta_B * T                                   # (B,)
-        T_swing  = (1.0 - beta_B) * T                            # (B,)
 
-        # u in [0,1), p in [0,1]
-        u = self._phase_u(phases)                                # (B,4)
-        beta4 = beta_B.view(B, 1).expand(B, 4)                   # (B,4)
-        den = (1.0 - beta4).clamp_min(1e-6)
-        p = ((u - beta4) / den).clamp(0.0, 1.0)                  # (B,4)
-        T_left = ((1.0 - p) * T_swing.view(B, 1)).clamp_min(1e-3) # (B,4)
-
-        # yaw -> body->world
+        # yaw -> body->world rotation
         yaw = self.yaw                                           # (B,)
         cy, sy = torch.cos(yaw), torch.sin(yaw)
         R_yaw = torch.stack(
@@ -279,45 +287,30 @@ class GaitPlanner:
              torch.stack([sy,  cy], dim=-1)], dim=1
         )                                                        # (B,2,2)
 
-        # hip offsets in body frame
+        # hip offsets in the body frame (same geometry as srbd.foot_positions_srbd)
+        hx, hy = float(cfg.hip_offset_x), float(cfg.hip_offset_y)
         hip_offsets_body = torch.tensor([
-            [ +0.1934, +0.1420 ],
-            [ +0.1934, -0.1420 ],
-            [ -0.1934, +0.1420 ],
-            [ -0.1934, -0.1420 ],
+            [ +hx, +hy ],
+            [ +hx, -hy ],
+            [ -hx, +hy ],
+            [ -hx, -hy ],
         ], dtype=torch.float32, device=dev).view(1,4,2).expand(B,4,2)
 
         base_xy = self.base_pos[:, 0:2]                          # (B,2)
 
         p_hip_xy_world = base_xy.view(B,1,2) + torch.matmul(hip_offsets_body, R_yaw.transpose(1,2))  # (B,4,2)
 
-
-        # v_des: cmd in body -> world
+        # v_des: commanded velocity, body -> world
         if hasattr(self, "cmd_rand"):
             v_des_body = self.cmd_rand[:, 0:2]                   # (B,2)
         else:
             v_des_body = torch.stack([self.vx_star, torch.zeros_like(self.vx_star)], dim=-1)
         v_des_world = torch.einsum("bij,bj->bi", R_yaw, v_des_body)  # (B,2)
 
-        # v_now: current estimated base velocity (world)
-        v_now_world = self.base_lin_world[:, 0:2]                # (B,2)
+        # Feed-forward term only (see docstring for the full heuristic).
+        term_ff = 0.5 * v_des_world.view(B,1,2) * T_stance.view(B,1,1)
 
-        term_predict = v_now_world.view(B,1,2) * T_left.unsqueeze(-1)                 # v*(1-p)T_swing
-
-        #term_ff      = 0.5 * v_des_world.view(B,1,2) * T_stance.view(B,1,1)           # 0.5*T_stance*v_des
-        term_ff      = 0.5 * v_des_world.view(B,1,2) * T_stance.view(B,1,1)
-
-        # Feedback term: when v_now < v_des, foothold should move forward (positive direction) to generate more thrust
-        # So use (v_des - v_now), this way when speed is insufficient term_fb is positive
-        term_fb      = cfg.k_raibert * (v_des_world - v_now_world).view(B,1,2)        # +k*(v_des - v_now)
-        fb_clip = float(getattr(cfg, "raibert_fb_clip", 0.15))
-        term_fb = term_fb.clamp(min=-fb_clip, max=+fb_clip)
-
-        # x_bias along body forward projected to world
-        fwd_world = torch.stack([cy, sy], dim=1)                 # (B,2)
-        term_bias = cfg.x_bias * fwd_world.view(B,1,2)
-        #p_land_xy_world = p_hip_xy_world + term_predict + term_ff + term_fb + term_bias
-        p_land_xy_world = p_hip_xy_world  + term_ff 
+        p_land_xy_world = p_hip_xy_world + term_ff
         return p_hip_xy_world, p_land_xy_world
 
 
@@ -332,28 +325,28 @@ class GaitPlanner:
     
 
     def _get_beta_minfeet_allow_aerial(self):
-        """
-        Per Fig 9.2/9.3: give duty factor β=r for each gait, and decide whether to allow aerial phase (min_feet=0)
+        """Per-gait duty factor, minimum stance-feet count and aerial-phase permission.
+
         Returns:
-        beta_B      : (B,) in (0,1]
-        min_feet_B  : (B,) int64, 0/2/4
-        allow_aerial: (B,) bool
+            beta_B: (B,) duty factor in (0, 1].
+            min_feet_B: (B,) int64, minimum simultaneous stance feet (0/2/4).
+            allow_aerial: (B,) bool, whether a full aerial phase is permitted.
         """
         dev, B = self.device, self.B
         cfg = self.cfg
 
-        # Your existing gait_ids: 0 stand, 1 trot, 2 pace, 3 bound, 4 gallop
+        # gait ids: 0 stand, 1 trot, 2 pace, 3 bound, 4 gallop
         gait_ids = getattr(self, "gait_ids", torch.ones(B, dtype=torch.long, device=dev)).to(dev)
 
-        # ---- Default duty factors (can adjust per your textbook/paper) ----
+        # Duty factors per gait (textbook values; trot has walk/normal/run variants).
         beta_stand  = 1.0
-        beta_trot_n = 0.5   # Fig 9.2a
-        beta_trot_w = 0.6   # Fig 9.2b: r>0.5 (walking)
-        beta_trot_r = 0.4   # Fig 9.2c: r<0.5 (running -> has aerial)
-        beta_pace   = 0.5   # Fig 9.3b text gives r=0.5
-        beta_bound  = 0.4   # Fig 9.3a text gives r<0.5 (has aerial)
-        beta_gallop = 0.35  # Textbook figure doesn't give specific value, commonly use smaller duty for obvious aerial
-        # You can force which trot variant via cfg.trot_style: “normal” / “walk” / “run”
+        beta_trot_n = 0.5   # normal trot
+        beta_trot_w = 0.6   # walking trot (duty > 0.5)
+        beta_trot_r = 0.4   # running trot (duty < 0.5 -> aerial phase)
+        beta_pace   = 0.5
+        beta_bound  = 0.4   # duty < 0.5 -> aerial phase
+        beta_gallop = 0.35  # small duty for a pronounced aerial phase
+        # The trot variant is selected via cfg.trot_style: "normal" / "walk" / "run".
         trot_style = getattr(cfg, "trot_style", "normal")
         if trot_style not in ("normal", "walk", "run"):
             trot_style = "normal"
@@ -367,20 +360,20 @@ class GaitPlanner:
         )
         beta_B = beta_table[gait_ids].clamp(min=1e-3, max=1.0)  # (B,)
 
-        # ---- min_feet: strictly decide by “whether to allow aerial phase” ----
-        # walking/normal trot, pace: at least 2 feet support at any moment
-        # stand: 4 feet
-        # bound/gallop, running trot: allow aerial => min_feet=0
+        # min_feet follows from the aerial-phase permission:
+        #   walking/normal trot, pace -> at least 2 stance feet at any moment;
+        #   stand -> 4 feet; bound/gallop and running trot -> aerial allowed (0).
         allow_aerial = (gait_ids == 3) | (gait_ids == 4)  # bound/gallop
-        # trot aerial decided by beta<0.5 (running trot)
-        allow_aerial = allow_aerial | ((gait_ids == 1) & (beta_B < 0.5))
+        allow_aerial = allow_aerial | ((gait_ids == 1) & (beta_B < 0.5))  # running trot
 
-        # Training warm-up: disable aerial phase first, avoid initial “free fall + forward flip”
+        # Training warm-up: disable the aerial phase to avoid the initial
+        # free-fall-and-forward-flip failure mode.
         if getattr(cfg, "train_no_aerial", False):
             allow_aerial = torch.zeros_like(allow_aerial, dtype=torch.bool)
-            # ✅ Key fix: when disabling aerial, force duty >= 0.5
-            # Otherwise bound/gallop's β<0.5 causes “nominal stance less than 2 feet”,
-            # _mix_stance will use topk to force support feet -> fake support feet lock last_contact -> easy forward flip
+            # With aerial disabled the duty factor must be >= 0.5: otherwise
+            # bound/gallop's beta < 0.5 leaves fewer than 2 nominal stance feet,
+            # _mix_stance force-fills them via top-k, and those fake stance feet
+            # lock last_contact_* to bad positions (a forward-flip trigger).
             beta_B = torch.clamp(beta_B, min=0.5, max=1.0)
 
         min_feet_B = torch.full((B,), 2, dtype=torch.long, device=dev)
@@ -388,23 +381,20 @@ class GaitPlanner:
         min_feet_B = torch.where(allow_aerial, torch.zeros_like(min_feet_B), min_feet_B)
         return beta_B, min_feet_B, allow_aerial
 
-    # Calculate stance_mask based on phase & β (strict version): determine if current leg is stance or swing
-
     def _stance_phase_mask(self, phases: torch.Tensor, beta_B: torch.Tensor) -> torch.Tensor:
-        """
-        Strict duty-factor definition:
-          u in [0,1), stance if u < β, swing otherwise
-        phases: (B,4)
-        beta_B: (B,)
-        return: (B,4,1)
+        """Strict duty-factor stance mask: stance iff normalised phase u < beta.
+
+        Args:
+            phases: (B, 4) absolute leg phases in radians.
+            beta_B: (B,) per-env duty factor.
+
+        Returns:
+            (B, 4, 1) float mask, 1 = stance, 0 = swing.
         """
         B = self.B
         u = self._phase_u(phases)                       # (B,4)
         beta = beta_B.view(B, 1)                        # (B,1)
         return (u < beta).float().unsqueeze(-1)         # (B,4,1)
-        
-    
-
 
     def _mix_stance(self,
                 phases: torch.Tensor,
@@ -413,13 +403,23 @@ class GaitPlanner:
                 min_feet_B: torch.Tensor,
                 w_phase: float = 1.0,
                 w_contact: float = 0.0):
-        """
-        phases       : (B,4)
-        contact_flags: (B,4,1)  (can be passed in, but in strict mode default w_contact=0)
-        beta_B       : (B,)
-        min_feet_B   : (B,) long, 0/2/4
+        """Blend the phase-based stance mask with contact flags, enforcing min feet.
 
-        Returns stance_mask: (B,4,1)
+        In the strict (default) configuration ``w_contact=0``, so the mask is
+        purely the duty-factor definition; the contact input is kept for
+        experimentation. Environments with fewer than ``min_feet_B`` stance
+        feet get their top-k legs forced to stance (never triggered for
+        aerial-permitted gaits, whose min_feet is 0).
+
+        Args:
+            phases: (B, 4) absolute leg phases in radians.
+            contact_flags: (B, 4, 1) measured contact states.
+            beta_B: (B,) duty factor.
+            min_feet_B: (B,) int64 minimum stance feet (0/2/4).
+            w_phase, w_contact: Blend weights for the two mask sources.
+
+        Returns:
+            (B, 4, 1) stance mask.
         """
         dev, B = self.device, self.B
 
@@ -443,6 +443,3 @@ class GaitPlanner:
         forced = (rank < min_feet_B.view(B, 1)).to(flat.dtype)         # (B,4) one-hot top-k
         flat = torch.where(needs.view(B, 1), forced, flat)             # (B,4)
         return flat.view(B, 4, 1)
-
-    # ---------------- PD -> foot forces ----------------
-

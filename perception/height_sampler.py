@@ -33,7 +33,13 @@ def _gaussian_blur_2d(img: torch.Tensor, sigma: float) -> torch.Tensor:
     Returns:
         (1, 1, H, W) blurred tensor on the same device/dtype.
     """
+    # Replicate padding must be smaller than the padded dim, so clamp the radius
+    # to the field size (tiny fields, e.g. the 2x2 flat fallback, get a truncated
+    # kernel or -- at radius 0 -- pass through unchanged, which is exact for them).
     radius = max(1, int(math.ceil(3.0 * sigma)))
+    radius = min(radius, img.shape[-2] - 1, img.shape[-1] - 1)
+    if radius < 1:
+        return img
     x = torch.arange(-radius, radius + 1, dtype=img.dtype, device=img.device)
     kernel = torch.exp(-0.5 * (x / sigma) ** 2)
     kernel = kernel / kernel.sum()

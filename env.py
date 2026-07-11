@@ -1,4 +1,18 @@
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+"""Isaac Gym environment for Go2 quadruped locomotion training.
+
+``RealQuadEnv`` is the central hub of the project: it owns the Isaac Gym
+simulation (robots, terrain, PD control, state tensors), the gait planner and
+the differentiable SRBD model, plus the optional terrain-perception collector.
+``GaitPlanner`` and ``SRBDModel`` are attribute-proxy mixins that operate
+directly on this class's state (see their docstrings).
+
+The Rudin-terrain placement and dynamic curriculum methods
+(``_assign_rudin_origins``, ``_update_terrain_curriculum``) are ports of the
+corresponding legged_gym logic (Rudin et al., BSD-3-Clause, ETH Zurich /
+Nikita Rudin); see ``terrain.py`` for the full attribution note.
+"""
+
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi, gymtorch
     ISAAC_AVAILABLE = True
@@ -7,12 +21,11 @@ except Exception as e:
     print("[Warning] Isaac Gym import failed:", repr(e))
 
 import math
+import os
 from typing import Optional
 
 import numpy as np
 import torch
-    
-
 
 from config import (
     DBG_INIT_FALL,
@@ -32,7 +45,22 @@ from utils_math import (
 
 
 class RealQuadEnv:
+    """Batched Isaac Gym environment for the Unitree Go2.
+
+    Owns B parallel robots on one shared terrain surface, exposes the training
+    interface (``reset`` / ``reset_envs`` / ``step`` / ``get_obs``), foot
+    kinematics and contact sensing, and hosts the state written by the
+    ``GaitPlanner`` / ``SRBDModel`` proxy mixins. Optional terrain perception
+    (depth camera + height scan) is built when ``cfg.use_perception`` is set.
+    """
+
     def __init__(self, cfg: EnvCfg, device="cuda" if torch.cuda.is_available() else "cpu"):
+        """Create the simulation, terrain, robots and all persistent buffers.
+
+        Args:
+            cfg: Environment configuration (see ``config.EnvCfg``).
+            device: Torch device string; the GPU pipeline requires "cuda".
+        """
         assert ISAAC_AVAILABLE, "Isaac Gym is required to run this real quadruped environment."
 
         self.cfg = cfg
@@ -40,11 +68,11 @@ class RealQuadEnv:
         self.B = int(cfg.num_envs)  # Number of parallel robots
 
         self._render_cnt = 0
-        self.render_every = 10 # Can try 10~50
+        self.render_every = 10  # viewer refresh interval in sim steps
 
-        # ★ High-level velocity command: cmd_rand = [vx_cmd, vy_cmd, yaw_rate_cmd]
+        # High-level velocity command: cmd_rand = [vx_cmd, vy_cmd, yaw_rate_cmd]
         self.cmd_rand = torch.zeros(self.B, 3, device=self.device)   # (B,3)
-        self.vx_star  = torch.zeros(self.B, device=self.device)      # Keep an alias for Raibert / loss
+        self.vx_star  = torch.zeros(self.B, device=self.device)      # alias used by Raibert / loss
 
         # Rudin dynamic-curriculum bookkeeping (only used when terrain_type == "rudin" and
         # rudin_terrain.dynamic_curriculum). ep_len_buf counts env.step() calls since the last reset;
@@ -75,11 +103,6 @@ class RealQuadEnv:
         ], dtype=np.float32)
 
 
-        # Phase: FL, FR, RL, RR -> quadruped alternating gait
-        #self.leg_phase_offsets = torch.tensor(
-        #    [0.0, math.pi, math.pi, 0.0], dtype=torch.float32, device=self.device
-        #)
-
         # === Multi-gait: define phase patterns for different gaits (order: FL, FR, RL, RR) ===
         # 0: stand   - all four legs nearly synchronized
         # 1: trot    - diagonal gait (FL+RR, FR+RL)
@@ -87,17 +110,12 @@ class RealQuadEnv:
         # 3: bound   - bounding (front legs sync, rear legs sync)
         # 4: gallop  - galloping (FL, FR, RL, RR phases incrementally)
         stand = torch.zeros(4, dtype=torch.float32, device=self.device)
-
-        #trot  = torch.tensor([0.0, math.pi, math.pi, 0.0], dtype=torch.float32, device=self.device)
         trot  = torch.tensor([0.0, math.pi, math.pi, 0.0], dtype=torch.float32, device=self.device)
-
         pace  = torch.tensor([0.0, math.pi, 0.0, math.pi], dtype=torch.float32, device=self.device)
-
-        #bound = torch.tensor([0.0, 0.0, 0.5*math.pi, 0.5*math.pi], dtype=torch.float32, device=self.device)
         bound = torch.tensor([0.0, 0.0, math.pi, math.pi], dtype=torch.float32, device=self.device)
 
-        # gallop: front legs sync, rear legs sync, but rear legs lag front legs by 90°
-        #         This creates "rear legs push off → all legs airborne → front legs land" sequence, different from bound's 180° offset
+        # gallop: front pair and rear pair each in sync, rear lagging slightly, so the
+        # sequence is "rear push-off -> airborne -> front landing" (unlike bound's 180 deg).
         gallop = torch.tensor(
             [ 0, 0.1*2* math.pi,  math.pi, 1.1 * math.pi],  # FL, FR, RL, RR
             dtype=torch.float32,
@@ -138,9 +156,9 @@ class RealQuadEnv:
         sim_params.use_gpu_pipeline = self.cfg.use_gpu_pipeline
         _setup_physx_stable(sim_params, use_gpu=True)
 
-        print("DEBUG 1: before create_sim", flush=True)
+        print("[env] creating PhysX simulation", flush=True)
         self.sim = self.gym.create_sim(0, 0, gymapi.SIM_PHYSX, sim_params)
-        print("DEBUG 2: after create_sim", flush=True)
+        print("[env] simulation created", flush=True)
         assert self.sim is not None, "create_sim failed"
 
         # ===== Terrain / ground: one shared surface, chosen by cfg switch =====
@@ -182,8 +200,9 @@ class RealQuadEnv:
 
 
 
-        # Load asset
-        ASSET_ROOT = "/home/jakub/projects/BachelorThesis"
+        # Load asset (the URDF ships next to this file, so resolve it relative
+        # to the repository instead of hardcoding a machine-specific path).
+        ASSET_ROOT = os.path.dirname(os.path.abspath(__file__))
         ASSET_FILE = "go2_description.urdf"
 
         asset_opts = gymapi.AssetOptions()
@@ -202,8 +221,7 @@ class RealQuadEnv:
         if hasattr(asset_opts, "flip_visual_attachments"):
             asset_opts.flip_visual_attachments = True
 
-        print("DEBUG 5: before load_asset", flush=True)
-        print(ASSET_ROOT,ASSET_FILE)
+        print(f"[env] loading asset {ASSET_FILE} from {ASSET_ROOT}", flush=True)
         self.robot_asset = self.gym.load_asset(self.sim, ASSET_ROOT, ASSET_FILE, asset_opts)
         assert self.robot_asset is not None, f"Failed to load {ASSET_FILE}, please check path."
 
@@ -256,12 +274,12 @@ class RealQuadEnv:
         legs_seq = [_leg_of_key(k) for k in self.key12]
         expected = ["FL"]*3 + ["FR"]*3 + ["RL"]*3 + ["RR"]*3
         if legs_seq != expected:
-            print(f"[WARN] key12 order is not [FL*3, FR*3, RL*3, RR*3], current:", legs_seq)
+            print("[WARN] key12 order is not [FL*3, FR*3, RL*3, RR*3], current:", legs_seq)
             for leg in ("FL","FR","RL","RR"):
                 leg3idxs = [i for i, k in enumerate(self.key12) if _leg_of_key(k) == leg]
                 print(f"[HINT] {leg} indices in key12:", leg3idxs)
         else:
-            print(f"[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]")
+            print("[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]")
 
         # Parse rigid body names, establish feet_local
         rb_count = self.gym.get_asset_rigid_body_count(self.robot_asset)
@@ -320,7 +338,7 @@ class RealQuadEnv:
                 and getattr(self.terrain, "env_origins", None) is not None:
             self._assign_rudin_origins()
 
-        #self.actor_indices_t = torch.as_tensor(self.actor_indices, device=self.device, dtype=torch.long)
+        # int32: Isaac Gym's indexed-tensor APIs require int32 actor indices.
         self.actor_indices_t = torch.as_tensor(self.actor_indices, device=self.device, dtype=torch.int32)
 
         # DOF PD properties (same for all env actors)
@@ -421,23 +439,23 @@ class RealQuadEnv:
         self.srbd = SRBDModel(self)
         self._update_cache()
         self.srbd._srbd_init_from_isaac()
-        #self.last_contact_z = torch.zeros(self.B, 4, device=self.device)  # Store most recent contact height for each leg
+
         # ===== last-contact cache (world frame) =====
-        # Store most recent “touchdown moment” foot position (world frame) for each leg, used for: stance foot lock (matches textbook/Fig 9.2 description)
+        # Most recent touchdown position per leg; stance feet are locked to it
+        # so the PD target cannot drag them backward.
         self.last_contact_z  = torch.zeros(self.B, 4, device=self.device)     # (B,4)
         self.last_contact_xy = torch.zeros(self.B, 4, 2, device=self.device)  # (B,4,2)
 
         # ===== liftoff cache (world frame) =====
-        # Store most recent “liftoff moment” foot position (world frame) for each leg, used for: swing trajectory start point (x0,y0,z0)
+        # Most recent liftoff position per leg; used as the swing-trajectory start.
         self.last_liftoff_xyz = torch.zeros(self.B, 4, 3, device=self.device) # (B,4,3)
-        # Previous timestep stance_mask (used to detect stance->swing liftoff edge)
+        # Previous timestep stance_mask (detects the stance -> swing liftoff edge).
         self.prev_stance_mask = torch.ones(self.B, 4, 1, device=self.device)  # (B,4,1)
 
-        # ===== contact-edge cache (world frame) =====
-        # Used to detect touchdown (prev_contact=0 -> contact=1), avoid “ground scraping” during swing polluting last_contact_*
+        # ===== contact-edge cache =====
+        # Detects touchdown edges (prev contact 0 -> 1) so ground scraping during
+        # swing does not pollute last_contact_*.
         self.prev_contact_flags = torch.zeros(self.B, 4, 1, device=self.device)  # (B,4,1)
-
-
 
         # Initialize: fill last_contact_* with current foot positions
         with torch.no_grad():
@@ -461,10 +479,16 @@ class RealQuadEnv:
         # Only build the terrain-perception collector when explicitly enabled, so the
         # blind/flat SRBD path never imports the warp/torch-heavy perception code.
         self.perception = None
-        if getattr(self.cfg, "use_height_obs", False) or getattr(self.cfg, "use_terrain_loss", False):
+        if (getattr(self.cfg, "use_height_obs", False)
+                or getattr(self.cfg, "use_terrain_loss", False)
+                or getattr(self.cfg, "use_depth_obs", False)):
             assert getattr(self.cfg, "use_perception", False), (
-                "use_height_obs / use_terrain_loss require use_perception=True"
+                "use_height_obs / use_terrain_loss / use_depth_obs require use_perception=True"
             )
+        assert not (getattr(self.cfg, "use_height_obs", False)
+                    and getattr(self.cfg, "use_depth_obs", False)), (
+            "use_height_obs and use_depth_obs are mutually exclusive (flat obs vs obs+depth policy)"
+        )
         if getattr(self.cfg, "use_perception", False):
             from perception import PerceptionCollector  # lazy: pulls in Warp
             if not getattr(self.cfg, "use_gpu_pipeline", False):
@@ -515,13 +539,12 @@ class RealQuadEnv:
         return self.perception.height_sampler.sample_points(xy, smooth=smooth)
 
     def _sanity_check_io(self):
-        # Just do shape checking and debug printing
+        """One-time startup check: print Jacobian shapes/norm so IO problems fail loudly."""
         self.gym.refresh_jacobian_tensors(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         J = self.foot_jacobians()          # (B, 4, 3, cols)
         print("[CHECK] foot_jacobians shape:", tuple(J.shape), " (B,4,3,cols)")
-        cols = J.shape[-1]
 
         # Jacobian DOF offset (6 for floating base)
         dof_offset = getattr(self, "jac_dof_offset", 0)
@@ -532,24 +555,31 @@ class RealQuadEnv:
         print("[CHECK] ||J12||:", float(J12.norm()))
 
     def _commit_pos_targets(self):
+        """Push the current position-target buffer to the simulator."""
         self.gym.set_dof_position_target_tensor(
             self.sim, gymtorch.unwrap_tensor(self.pos_targets)
         )
 
     def _limit_step(self, tgt_prev: torch.Tensor, tgt_new: torch.Tensor, max_step=0.04):
-        # Support arbitrary shape: element-wise clamping
+        """Rate-limit a target update: clamp the per-element change to +-max_step."""
         delta = torch.clamp(tgt_new - tgt_prev, min=-max_step, max=+max_step)
         return tgt_prev + delta
 
     @torch.no_grad()
     def contact_force_values(self):
+        """Net contact-force magnitude per foot, (B, 4, 1) newtons."""
         self.gym.refresh_net_contact_force_tensor(self.sim)
         F = self.net_cf[:, self.feet_local, :].norm(dim=-1, keepdim=True)  # (B,4,1)
         return F
 
     @torch.no_grad()
     def contact_flags(self, thresh=None):
-        # ---- hysteresis contact ----
+        """Hysteresis contact detector, (B, 4, 1) in {0, 1}.
+
+        A foot switches to contact above ``cfg.contact_on_n`` newtons and back
+        to no-contact below ``cfg.contact_off_n``; in between it keeps its
+        previous state (suppresses chattering near the threshold).
+        """
         cfg = self.cfg
         F = self.contact_force_values().squeeze(-1)  # (B,4)
 
@@ -778,8 +808,17 @@ class RealQuadEnv:
         self.root_state[env_ids, 7:13] = 0.0
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_state))
 
-    # reset - make all robots stand properly again
     def reset(self, it: Optional[int] = None):
+        """Global reset: re-sample gait/pose/command for every robot and settle.
+
+        Re-samples gait ids, spawn poses (phase, yaw, terrain-aware placement),
+        velocity commands and step frequency / swing height, restores the
+        default joint posture, lets the sim settle for a few steps, then
+        re-initialises the SRBD state and the contact caches.
+
+        Args:
+            it: Training iteration index (unused; kept for call-site clarity).
+        """
         dev = self.device
 
         self.t = 0
@@ -870,12 +909,16 @@ class RealQuadEnv:
         # curriculum (legged_gym sets init_done at the end of construction for the same reason).
         self.init_done = True
 
-    # -------- New: local reset for partial envs only --------
     def reset_envs(self, env_ids):
-        """
-        Local reset: only reset these robots in env_ids to
-        “randomized but controlled initial posture + random velocity command”.
-        env_ids: can be int / list[int] / numpy / torch.Tensor
+        """Local reset: respawn only the robots in ``env_ids``.
+
+        Same sampling pipeline as :meth:`reset` but restricted to a subset
+        (used for per-env resets on falls / episode timeouts). On Rudin terrain
+        the dynamic curriculum runs first, so a robot may be promoted/demoted
+        to a different difficulty row before respawning.
+
+        Args:
+            env_ids: int / list[int] / numpy array / torch tensor of env indices.
         """
         env_ids = self._as_env_ids(env_ids)
         if env_ids.numel() == 0:
@@ -951,9 +994,13 @@ class RealQuadEnv:
             self._stride_last_td_xy0[:] = p_foot0
 
 
-    # This code block derives 1. step frequency 2. swing height 3. whether phase advances from velocity command
     def demo_trot(self, seconds=6.0, amp_thigh=0.25, amp_calf=0.45):
-        """Simple demo: all envs use same trot"""
+        """Policy-free smoke test: drive all envs with a scripted sinusoidal trot.
+
+        Args:
+            seconds: How long to run.
+            amp_thigh, amp_calf: Sinusoid amplitudes added to the default posture.
+        """
         steps = int(seconds / self.cfg.dt)
         self.phase = torch.zeros(self.B, device=self.device)
         for _ in range(steps):
@@ -984,8 +1031,8 @@ class RealQuadEnv:
 
             self.phase = (self.phase + 2*math.pi*self.cfg.step_freq*self.cfg.dt) % (2*math.pi)
 
-    # Quaternion -> Euler angles (batch version)
     def _rpy_from_quat_wxyz(self):
+        """Batched base orientation -> (roll, pitch, yaw), each (B,) radians."""
         qw, qx, qy, qz = self.base_quat[:, 0], self.base_quat[:, 1], self.base_quat[:, 2], self.base_quat[:, 3]
 
         sinr_cosp = 2.0 * (qw*qx + qy*qz)
@@ -1003,8 +1050,11 @@ class RealQuadEnv:
         return roll, pitch, yaw
 
     def _update_cache(self):
-        """
-        Refresh batch base pose / velocity etc. from Isaac.
+        """Refresh the cached base pose/velocity/joint tensors from Isaac Gym.
+
+        Populates ``base_pos``, ``base_quat`` (wxyz), world/body linear and
+        angular velocities, joint positions/velocities, and roll/pitch/yaw --
+        the state everything else (gait, SRBD init, observations) reads.
         """
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
@@ -1046,12 +1096,13 @@ class RealQuadEnv:
         self.omega = self.base_ang[:, 1]  # (B,)
 
 
-    # Camera follows robot 0
     def _yaw_from_quat(self) -> float:
+        """Yaw of robot 0 (radians), used by the chase camera."""
         qw, qx, qy, qz = self.base_quat[0]
         return math.atan2(2.0*(qw*qz + qx*qy), 1.0 - 2.0*(qy*qy + qz*qz))
 
     def _update_chase_camera(self):
+        """Smoothly track robot 0 with the viewer camera (when cam_follow is on)."""
         if self.viewer is None or not self.cam_follow: return
         px, py, pz = [float(v) for v in self.base_pos[0, :3]]
         yaw = self._yaw_from_quat()
@@ -1125,13 +1176,22 @@ class RealQuadEnv:
         return J_feet
 
 
-    #————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-    # Quadratic parabola interpolation - previously used foot trajectory parabola function, but now abandoned
     def estimate_foot_forces(self, q_ref12, q_now12, qd_now12, stance_mask):
-        """
-        q_ref12, q_now12, qd_now12 : (B,12)
-        stance_mask: (B,4,1)
-        Returns f: (B,4,3)
+        """Estimate ground-reaction forces from the PD torques via the Jacobian.
+
+        Computes the joint torques the PD controller implies, maps them to foot
+        forces with a damped pseudo-inverse of the stance-weighted Jacobian
+        (solved in float64 for numerical stability), then applies Fz clamping
+        and a friction-cone limit. Differentiable in ``q_ref12`` -- this is the
+        input path through which policy gradients reach the SRBD step.
+
+        Args:
+            q_ref12: (B, 12) reference joint angles (carries gradients).
+            q_now12, qd_now12: (B, 12) measured joint state (detached).
+            stance_mask: (B, 4, 1) stance feet mask.
+
+        Returns:
+            (B, 4, 3) world-frame foot forces.
         """
         dev = self.device
         Kp, Kd = self.cfg.pd_kp, self.cfg.pd_kd
@@ -1172,15 +1232,27 @@ class RealQuadEnv:
         f = torch.cat([ft, fz], dim=-1)                 # (B,4,3)
         return f
 
-    # ---------------- SRBD ----------------
     def step(self, delta_q: torch.Tensor):
-        """
-        delta_q: (B,12)
+        """Advance the Isaac Gym simulation by one control step.
+
+        Converts the policy output into PD joint targets (tanh squashing,
+        per-joint scaling, joint limits, rate limiting), steps PhysX once,
+        refreshes the cached state, maintains the touchdown caches and
+        evaluates termination.
+
+        Args:
+            delta_q: (B, 12) raw policy output (joint-angle offsets before
+                tanh/scaling).
+
+        Returns:
+            (obs, extra, q_err, q_ref12) where ``extra`` carries the ``done``
+            (fall) and ``timeout`` (Rudin episode limit) masks, and ``q_ref12``
+            is the gradient-carrying joint reference consumed by the SRBD step.
         """
         cfg = self.cfg
 
-        # Update step frequency / swing height for each robot based on current vx_star
-        self.gait._update_gait_from_cmd()                      # ★ New addition
+        # Update step frequency / swing height per robot from the current command.
+        self.gait._update_gait_from_cmd()
 
         # Update phase using per-env step frequency: phase_{t+1} = phase_t + 2π f Δt
         # self.step_freq_B: (B,)
@@ -1209,8 +1281,11 @@ class RealQuadEnv:
 
         # Target joints
         target_slice = self.local_targets.clone()   # (B,dof)
-        #target_slice[:, self.ctrl_idx_t] = q_ref12 * self.ctrl_sign   # (B,12)
-        target_slice[:, self.ctrl_idx_t] = q_ref12 * ctrl_sign12   # policy -> sim target positions for 12 joint DOFs
+        # .detach(): local_targets only feeds Isaac's (non-differentiable) PD targets,
+        # but it is rate-limited against its previous value every step, so without the
+        # detach it chains an autograd graph across the whole run (never freed under
+        # ONLY_ITERATE_NO_RESET). The gradient path lives in the returned q_ref12.
+        target_slice[:, self.ctrl_idx_t] = (q_ref12 * ctrl_sign12).detach()   # policy -> sim target positions for 12 joint DOFs
 
         # Clamping & limits & rate of change
         target_slice = torch.max(torch.min(target_slice, self._hi_slice), self._lo_slice)
@@ -1264,9 +1339,10 @@ class RealQuadEnv:
                 self.prev_contact_flags = c.unsqueeze(-1).clone()
                 prev_c = self.prev_contact_flags
 
-            # ✅ Fix: touchdown updates whenever contact edge occurs
-            # The old stance_phase gate would ignore “scraping/early touchdown/terrain bump touchdown”,
-            # causing last_contact_* to lock to wrong height/position for long time, stance foot locking easily produces forward flip torque
+            # Touchdown is any contact rising edge. Gating this on the stance
+            # phase would miss scraping / early / terrain-bump touchdowns and
+            # leave last_contact_* locked to stale positions (a stance-foot
+            # lock at the wrong height produces forward-flip torque).
             touchdown = ((prev_c.squeeze(-1) <= 0.5) & (c > 0.5))  # (B,4)
             self.last_contact_xy = torch.where(
                 touchdown.unsqueeze(-1),
@@ -1297,7 +1373,6 @@ class RealQuadEnv:
 
                 # Nominal stride (estimated from current f0 and actual v_body_x)
                 stride_est = (v_body_x / (f0 + 1e-9))  # m
-                step_est   = 0.5 * stride_est          # m
 
                 leg_names = ["FL", "FR", "RL", "RR"]
                 # ===== phase u (env0) for touchdown gating =====
@@ -1312,20 +1387,17 @@ class RealQuadEnv:
 
                 for leg in range(4):
                     if bool(touchdown[b0, leg].item()):
-                        # ===== Phase gating: only accept touchdown “near phase boundary” (filter jitter/double touchdown) =====
-                        # True touchdown (swing->stance) should occur when u is close to 0
+                        # Phase gating: only accept touchdowns near the phase
+                        # boundary (u close to 0) to filter jitter / double hits.
                         if not (float(u0[leg].item()) < u_eps):
                             continue
-                        min_dt = 0.12  # seconds: conservative “minimum interval between two touchdowns of same leg”
-                        min_steps = int(min_dt / self.cfg.dt)  # dt=0.002 -> 60 steps
 
-                        # Or more adaptive (recommended): 60% of half period as cooldown
+                        # Cooldown between touchdowns of the same leg: half the
+                        # current gait period.
                         T0 = 1.0 / max(f0, 1e-6)
-                        min_steps = int( 0.5 * T0 / self.cfg.dt)  # 0.6*(T/2)
-
-                        # Cooldown check
+                        min_steps = int(0.5 * T0 / self.cfg.dt)
                         if (self.t - int(self._stride_last_td_step0[leg].item())) < min_steps:
-                             continue  # Too close, consider it jitter trigger, ignore
+                            continue  # too close -> jitter trigger, ignore
                         self._stride_last_td_step0[leg] = self.t
 
 
@@ -1415,8 +1487,8 @@ class RealQuadEnv:
                      f"stanceMix={np.round(stance_mix.cpu().numpy(),0).astype(int).tolist()} | "
                      f"zFoot={np.round(z_foot0,3).tolist()} zLast={np.round(z_lc0,3).tolist()}"
                  )
-             except Exception as _e:
-                 # Don't let debug print affect training
+             except Exception:
+                 # Never let a debug print break training.
                  pass
 
         fallen_height = (self.base_pos[:, 2] < 0.16)           # (B,)
@@ -1438,16 +1510,26 @@ class RealQuadEnv:
             "muN": torch.ones(self.B, device=self.device),
             "q_err_norm": torch.zeros(self.B, device=self.device),
         }
-        q_now12 = self.q[:, self.ctrl_idx_t]                   # (B,12)
-        #q_err = q_ref12 - q_now12
-        q_now_sim = self.q[:, self.ctrl_idx_t]                      # sim
-        q_now_pol = q_now_sim * ctrl_sign12                         # sim -> policy
-        q_err = q_ref12 - q_now_pol                                 # policy - policy ✅
+        q_now_sim = self.q[:, self.ctrl_idx_t]                      # sim convention
+        q_now_pol = q_now_sim * ctrl_sign12                         # sim -> policy convention
+        q_err = q_ref12 - q_now_pol                                 # both sides in policy convention
 
         return obs, extra, q_err, q_ref12
 
     @torch.no_grad()
     def get_obs(self):
+        """Assemble the policy observation from the current Isaac state.
+
+        Layout (36-D): 3 command + 8 phase sin/cos + 3 body linear velocity +
+        4 base quaternion (wxyz) + 3 body angular velocity + 12 joint deltas
+        from the default posture + 3 body-frame gravity projection. With
+        ``cfg.use_height_obs`` the 187-point height scan is appended (see
+        ``obs_dim``). Deliberately grad-free: observations are input leaves;
+        the gradient path into the policy runs through the SRBD losses.
+
+        Returns:
+            (B, obs_dim) observation tensor.
+        """
         cfg, dev = self.cfg, self.device
         B = self.B
 
@@ -1462,8 +1544,7 @@ class RealQuadEnv:
                 torch.zeros_like(self.vx_star)
             ], dim=1)
 
-        #phases = self.leg_phase_offsets.view(1,4) + self.phase.view(B,1)  # (B,4)
-        # Use multi-gait phase table to generate phase for each leg
+        # Per-leg phases from the multi-gait phase table.
         if hasattr(self, "leg_phase_offsets_B"):
             phase_offsets = self.leg_phase_offsets_B                         # (B,4)
         else:
@@ -1471,12 +1552,9 @@ class RealQuadEnv:
 
         phases = phase_offsets + self.phase.view(B,1)  # (B,4)
 
-
-
-
         sincos = torch.stack([torch.sin(phases), torch.cos(phases)], dim=2).reshape(B, 8)
 
-        v_b = self.base_lin_body                             # (B,3) in rollout loop, after each _srbd_step() that “strict alpha align” section. Position is very clear: you first use SRBD to do forward update, then immediately use SRBD state with I
+        v_b = self.base_lin_body                             # (B,3) body-frame linear velocity
         q_wxyz = self.base_quat                              # (B,4)
         w_b  = self.base_ang_body                            # (B,3)
 

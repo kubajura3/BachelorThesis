@@ -1,9 +1,16 @@
+"""Math and reproducibility helpers shared across the project.
+
+Quaternion utilities (wxyz convention unless stated otherwise), gravity
+projection, seeding and simple signal smoothing. All tensor helpers support
+both single inputs and batches of shape (B, ...).
+"""
+
 import math
 import random
 
 import numpy as np
 
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi
 except Exception:
@@ -13,6 +20,11 @@ import torch
 
 
 def set_seed(seed: int = 0):
+    """Seed python, numpy and torch (CPU + CUDA) and force deterministic cuDNN.
+
+    Args:
+        seed: The seed applied to every RNG.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -22,17 +34,31 @@ def set_seed(seed: int = 0):
 
 
 def moving_average(x: np.ndarray, k: int = 25) -> np.ndarray:
+    """Box-filter smoothing used for the training curves.
+
+    Args:
+        x: 1-D array of samples.
+        k: Window length; ``k <= 1`` returns ``x`` unchanged.
+
+    Returns:
+        Array of the same length (``np.convolve`` with ``mode="same"``).
+    """
     if k <= 1:
         return x
     w = np.ones(k) / k
     return np.convolve(x, w, mode="same")
 
 
-# Quaternion wxyz -> rotation matrix (non-batch version)
 def quat_to_rot(qw, qx, qy, qz, device):
-    """
-    Convert quaternion components to rotation matrix.
-    Supports both single scalars and batched tensors of shape (B,).
+    """Quaternion (wxyz components) -> rotation matrix.
+
+    Args:
+        qw, qx, qy, qz: Quaternion components, either scalars (0-dim tensors)
+            or batched tensors of shape (B,).
+        device: Device the resulting matrix is placed on.
+
+    Returns:
+        (3, 3) rotation matrix for scalar input, (B, 3, 3) for batched input.
     """
     r00 = 1 - 2 * (qy*qy + qz*qz)
     r01 = 2 * (qx*qy - qz*qw)
@@ -54,18 +80,32 @@ def quat_to_rot(qw, qx, qy, qz, device):
     ], dim=stack_dim).to(device)
 
 
-# Project gravity acceleration to body frame -> used for observation and gravity penalty in loss
 def project_gravity_to_body(q_wxyz, g, device):
-    # q_wxyz = (w,x,y,z)
+    """Project the world gravity vector into the body frame.
+
+    Used for the gravity-projection observation and the corresponding loss
+    term (a level body sees gravity as (0, 0, -g)).
+
+    Args:
+        q_wxyz: Base orientation quaternion components (w, x, y, z).
+        g: Gravity magnitude in m/s^2.
+        device: Torch device.
+
+    Returns:
+        (3,) gravity vector expressed in the body frame.
+    """
     qw, qx, qy, qz = q_wxyz
     R = quat_to_rot(qw, qx, qy, qz, device)
     g_w = torch.tensor([0.0, 0.0, -g], dtype=torch.float32, device=device)
     return R.t().matmul(g_w)  # (3,)
 
 
-# Euler angles -> quaternion
 def quat_from_rpy(roll: float, pitch: float, yaw: float):
-    # gymapi.Quat(x, y, z, w)
+    """Euler angles (roll, pitch, yaw in radians) -> ``gymapi.Quat`` (x, y, z, w).
+
+    Standard ZYX (yaw-pitch-roll) composition, returned in Isaac Gym's xyzw
+    quaternion order for use in actor poses.
+    """
     cr, sr = math.cos(roll*0.5),  math.sin(roll*0.5)
     cp, sp = math.cos(pitch*0.5), math.sin(pitch*0.5)
     cy, sy = math.cos(yaw*0.5),   math.sin(yaw*0.5)
@@ -76,37 +116,33 @@ def quat_from_rpy(roll: float, pitch: float, yaw: float):
     return gymapi.Quat(x, y, z, w)
 
 
-# World frame -> body frame rotation (single q, v)
 def quat_rotate_inverse_wxyz(q_wxyz, v, device):
-    """
-    Rotate vector v from world frame to body frame: v_body = R(q)^T * v_world
-    Supports both single (4,) and (3,) vectors, as well as batches (B, 4) and (B, 3).
+    """Rotate a vector from the world frame into the body frame.
 
-    q_wxyz: (4,) or (B, 4)
-    v: (3,) or (B, 3)
+    Computes ``v_body = R(q)^T @ v_world`` for a single pose or a batch.
+
+    Args:
+        q_wxyz: Quaternion in wxyz order, shape (4,) or (B, 4).
+        v: World-frame vector, shape (3,) or (B, 3).
+        device: Torch device.
+
+    Returns:
+        Body-frame vector with the same leading shape as the input.
     """
-    # We check if the input is batched by looking at the number of dimensions. If it's 2D, we assume it's (B, 4) and (B, 3). If it's 1D, we assume it's (4,) and (3,).
     is_batched = q_wxyz.dim() == 2
 
-    # If it's a single example, artificially add a batch dimension (dimension 0)
+    # Promote single inputs to a batch of one so the einsum below is uniform.
     if not is_batched:
         q_wxyz = q_wxyz.unsqueeze(0)  # (4,) -> (1, 4)
         v = v.unsqueeze(0)            # (3,) -> (1, 3)
 
-    # We take the quaternion components. For the batched case, this will give us tensors of shape (B,).
     qw, qx, qy, qz = q_wxyz[:, 0], q_wxyz[:, 1], q_wxyz[:, 2], q_wxyz[:, 3]
-    
-    # quat_to_rot also supports (B, 3, 3)
     R = quat_to_rot(qw, qx, qy, qz, device)  # (B, 3, 3)
 
-    # Multiply R^T @ v using einsum for the whole batch.
-    # 'bij' is matrix R (b-batch, i-row, j-column).
-    # 'bi' is vector v (b-batch, i-element).
-    # We sum over 'i' (rows of R), which mathematically corresponds to multiplication by the transpose (R^T).
+    # Summing over i (the rows of R) multiplies by the transpose: R^T @ v.
     v_body = torch.einsum('bij,bi->bj', R, v)  # (B, 3)
 
-    # If the input was a single vector, restore its original shape (3,)
     if not is_batched:
         return v_body.squeeze(0)
-        
+
     return v_body

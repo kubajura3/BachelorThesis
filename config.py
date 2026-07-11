@@ -5,21 +5,21 @@ from dataclasses import dataclass, field
 from perception.config import PerceptionCfg
 
 # ===============================
-# ⭐ Pure Paper Mode Switch
+# Pure Paper Mode Switch
 # ===============================
 PURE_PAPER_MODE = True
 # True  = Pure paper version (no engineering tricks)
 # False = Engineering version (with initial velocity, action smoothing, etc.)
 
 # ===============================
-# ⭐ Initial Fall Debug Print Switch (only print first N steps of env0)
+# Initial Fall Debug Print Switch (only print first N steps of env0)
 # ===============================
 DBG_INIT_FALL = True
 DBG_INIT_FALL_STEPS = 250     # Only print first N env.step() calls (t starts from 0 after each reset)
 DBG_INIT_FALL_EVERY = 5       # Print every N steps
 DBG_INIT_FALL_ENV = 0         # Only watch which robot (env index)
 
-# ⭐ Whether to only reset at iter=0
+# Whether to only reset at iter=0
 ONLY_ITERATE_NO_RESET = True
 # True: no reset
 # False: reset
@@ -28,7 +28,7 @@ ONLY_ITERATE_NO_RESET = True
 # randomization switches live in one place. See EnvCfg and RudinTerrainCfg below.
 
 # ===============================
-# ⭐ SRBD CUDA Kernel Switch
+# SRBD CUDA Kernel Switch
 # ===============================
 CUDA_KERNEL_SRBD = True
 # True  = Use custom CUDA kernel for _srbd_step (requires: python setup.py build_ext --inplace)
@@ -89,6 +89,11 @@ class EnvCfg:
     # height + swing-foot clearance, sampled at SRBD-predicted positions so the terrain
     # slope back-propagates into the policy). Requires use_perception=True.
     use_terrain_loss: bool = False
+    # Vision-policy path in train.py: the depth camera image is encoded by a CNN and
+    # fed to the policy alongside the 36-D proprio obs (obs itself stays 36-D; depth is
+    # a separate input). Requires use_perception=True; mutually exclusive with
+    # use_height_obs (a policy takes either the flat obs or obs+depth, not both).
+    use_depth_obs: bool = False
     action_hold: int = 5      # 100 Hz control
 
     pd_kp: float = 60      # 60
@@ -151,6 +156,13 @@ class EnvCfg:
     Iyy: float = 0.098
     Izz: float = 0.107
 
+    # Go2 leg geometry used by the SRBD foot kinematics (srbd.foot_positions_srbd)
+    # and the Raibert foothold planner (gait._raibert_touchdown_world).
+    hip_offset_x: float = 0.1934   # [m] hip forward offset from the base origin
+    hip_offset_y: float = 0.1420   # [m] hip lateral offset from the base origin
+    leg_l1: float = 0.213          # [m] thigh link length
+    leg_l2: float = 0.213          # [m] calf link length
+
 
     alpha_align: float = 0.9
     use_strict_alpha_align: bool = True
@@ -173,7 +185,8 @@ class EnvCfg:
     # Increase velocity command: previous 0.1-0.3 too slow, Raibert foothold displacement too small
     vx_min: float = +0.4   # Increase minimum velocity
     vx_max: float = +0.8   # Increase maximum velocity
-    # Lateral velocity and yaw rate command range (default all 0, change later if you want lateral movement / turning)
+    # Lateral velocity and yaw-rate command ranges (all 0 by default; widen to
+    # enable lateral movement / turning in the random-command mode)
     vy_min: float = 0
     vy_max: float = 0
     yaw_min: float = 0        # [rad/s]
@@ -211,4 +224,6 @@ class EnvCfg:
     contact_on_n: float  = 20.0
     contact_off_n: float = 10.0
 
-    delta_q_scale12 = (0.10, 0.30, 0.30) * 4
+    # Per-joint action scale (hip, thigh, calf) x 4 legs: policy outputs pass
+    # through tanh and are multiplied by these before being added to q_default.
+    delta_q_scale12: tuple = (0.10, 0.30, 0.30) * 4

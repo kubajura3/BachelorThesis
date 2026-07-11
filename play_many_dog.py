@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
-"""
-play.py - Use trained policy to play multi-dog walking in Isaac Gym in real-time.
+"""play_many_dog.py - Visualise a trained policy on multiple robots in Isaac Gym.
+
+Loads a trained blind policy and runs it live in the Isaac Gym viewer (no SRBD
+model, no gradients -- pure playback with per-env resets on falls).
 
 Usage examples:
-    python play_many_dog.py                           # Default: 4 dogs + random velocity commands
-    python play_many_dog.py --num_envs 16            # 16 dogs running together
-    python play_many_dog.py --no_rand_cmd            # Fixed 0.5 m/s walking
-    python play_many_dog.py --gait_mode 1            # Fixed trot gait
-    python play_many_dog.py --weights your_ckpt.pth  # Specify weight file
+    python play_many_dog.py                           # default: EnvCfg num_envs, viewer on
+    python play_many_dog.py --num_envs 16            # 16 robots running together
+    python play_many_dog.py --no_rand_cmd            # fixed velocity command
+    python play_many_dog.py --gait_mode 1            # fixed trot gait
+    python play_many_dog.py --weights your_ckpt.pth  # specify a weight file
 """
 
 import os
 import argparse
 
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi
 except Exception:
@@ -30,19 +32,24 @@ def load_policy(weight_path: str,
                 device: torch.device,
                 dim_obs: int = 36,
                 dim_action: int = 12) -> Policy:
-    """Build Policy and load parameters from weight file (if exists)"""
+    """Build a Policy of the given size and load weights from ``weight_path``.
+
+    Falls back to a randomly initialised policy (with a warning) when the
+    weight file does not exist, so the script stays usable for smoke tests.
+    """
     policy = Policy(dim_obs, dim_action).to(device)
     if os.path.isfile(weight_path):
         state = torch.load(weight_path, map_location=device)
         policy.load_state_dict(state)
-        print(f"✅ Loaded policy weights from {weight_path}.")
+        print(f"[play] Loaded policy weights from {weight_path}.")
     else:
-        print(f"⚠️ Weight file {weight_path} not found, using randomly initialized policy.")
+        print(f"[play] WARNING: weight file {weight_path} not found, using randomly initialized policy.")
     policy.eval()
     return policy
 
 
 def main():
+    """Parse arguments, build the env + policy and run the playback loop."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--weights",
@@ -65,7 +72,7 @@ def main():
     parser.add_argument(
         "--no_rand_cmd",
         action="store_true",
-        help="Disable random velocity commands, use fixed 0.2 m/s"
+        help="Disable random velocity commands, use the fixed cfg.cmd_fixed command"
     )
     parser.add_argument(
         "--gait_mode",
@@ -95,20 +102,22 @@ def main():
 
     # Velocity command switch
     if args.no_rand_cmd:
-        cfg.rand_cmd = False  # Fixed vx_star = 0.2
+        cfg.rand_cmd = False  # use cfg.cmd_fixed instead of per-env random commands
     # Gait mode (optional)
     if args.gait_mode is not None:
         cfg.gait_mode = args.gait_mode
 
     # -------- Build environment & policy --------
     env = RealQuadEnv(cfg, device=device)
-    env.reset()  # Initialize to “standing + random/fixed commands”
+    env.reset()  # standing posture + random/fixed commands
 
-    policy = load_policy(args.weights, device)
+    # env.obs_dim keeps the policy size consistent with the env configuration
+    # (36 blind, 36+187 if a height-scan config were enabled).
+    policy = load_policy(args.weights, device, dim_obs=env.obs_dim)
     B = env.B
     dim_action = 12
 
-    # Follow many_dog_walk.train logic for action_hold / smoothing
+    # Same action_hold / smoothing logic as train.py.
     hx = None
     a_prev = torch.zeros(B, dim_action, device=device)
     hx_hold = None
@@ -116,9 +125,9 @@ def main():
     t = 0
     steps_done = 0
 
-    print("🎮 Starting DiffSim Quadruped multi-dog environment playback")
-    print(f"   Number of parallel quadrupeds B = {B}")
-    print("   Tip: Move camera freely in Isaac Gym viewer window, close window to exit.")
+    print("[play] Starting multi-robot policy playback")
+    print(f"[play] Number of parallel robots B = {B}")
+    print("[play] Move the camera freely in the Isaac Gym viewer; close the window to exit.")
 
     try:
         while True:
@@ -155,8 +164,8 @@ def main():
                 fallen_ids = torch.nonzero(done, as_tuple=False).squeeze(-1)
                 print(f"[play] Partial reset envs: {fallen_ids.cpu().tolist()}")
                 env.reset_envs(fallen_ids)
-                # If switching to RNN policy later, can zero out hidden state for corresponding envs here
-                # Currently Policy doesn't use hidden state, can ignore hx
+                # A future recurrent policy would need its hidden state zeroed
+                # for these envs here; the feed-forward Policy has none.
 
             t += 1
             steps_done += 1

@@ -1,4 +1,15 @@
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+"""Differentiable Single Rigid Body Dynamics (SRBD) model.
+
+The SRBD model is the differentiable physics surrogate that trains the policy:
+Isaac Gym steps the full-fidelity (non-differentiable) robot, while this module
+re-integrates the same contact forces analytically so ``loss.backward()`` can
+reach the policy through the dynamics. Two numerically equivalent backends are
+provided: a pure PyTorch implementation (default) and an optional fused CUDA
+kernel (``CUDA_KERNEL_SRBD`` in config.py) wrapped in a
+``torch.autograd.Function`` with a hand-written analytic adjoint.
+"""
+
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi
 except Exception:
@@ -31,21 +42,21 @@ if _USE_CUDA_KERNEL:
         _USE_CUDA_KERNEL = False
 
 
-# ---------------------------------------------------------------------------
-# SRBDStepFunction — torch.autograd.Function wrapper
-#
-# Forward : calls srbd_step_forward (one-thread-per-env CUDA kernel).
-# Backward: calls srbd_step_backward (hand-written analytic adjoint).
-#
-# All six tensor inputs (p, v, q, w, f_world, q_ref12) can carry gradients.
-# Within a training iteration the SRBD state (srbd_p/v/q/w) carries grad_fn
-# chains back into previous steps' policy outputs (the strict alpha-alignment
-# at train.py:188-192 preserves these chains with multiplier alpha).
-# Detachment happens at the iteration boundary (train.py:415-418), not per step.
-# ---------------------------------------------------------------------------
 class SRBDStepFunction(torch.autograd.Function):
+    """Autograd wrapper around the fused CUDA SRBD kernel.
+
+    Forward calls ``srbd_step_forward`` (one thread per environment); backward
+    calls ``srbd_step_backward``, a hand-written analytic adjoint (no PyTorch
+    replay). All six tensor inputs (p, v, q, w, f_world, q_ref12) can carry
+    gradients. Within a training iteration the SRBD state keeps its grad_fn
+    chain back into earlier steps' policy outputs (the alpha-alignment in
+    train.py preserves the chain scaled by alpha); detachment happens at the
+    iteration boundary, not per step.
+    """
+
     @staticmethod
     def forward(ctx, p, v, q, w, f_world, q_ref12, m, g, Ixx, Iyy, Izz, dt):
+        """Run one fused SRBD step on the CUDA kernel; returns (p, v, q, w) at t+dt."""
         # Saved tensors must be contiguous because the backward kernel
         # re-reads them via raw float pointers.
         p = p.contiguous()
@@ -67,6 +78,7 @@ class SRBDStepFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_p_new, grad_v_new, grad_q_new, grad_w_new):
+        """Analytic adjoint: gradients for the six tensor inputs (scalars get None)."""
         p, v, q, w, f_world, q_ref12 = ctx.saved_tensors
         m, g, Ixx, Iyy, Izz, dt = ctx.physics
 
@@ -96,37 +108,44 @@ class SRBDStepFunction(torch.autograd.Function):
         )
 
 
-# ---------------------------------------------------------------------------
-# SRBDModel
-#
-# Differentiable Single Rigid Body Dynamics proxy used during training.
-# Holds no state of its own — it proxies attribute access onto the wrapped
-# `env` via __getattr__ / __setattr__, so `self.srbd_p`, `self.srbd_q`,
-# `self.cfg`, `self.device`, etc. all resolve to `env.srbd_p`, etc.
-#
-# The hot path is `_srbd_step(...)`, which dispatches to either:
-#   - the custom CUDA kernel (when CUDA_KERNEL_SRBD=True in config.py and
-#     the extension is built), wrapped by SRBDStepFunction for autograd, or
-#   - a pure PyTorch implementation (default — always available).
-# Both paths produce numerically equivalent forward outputs and matching
-# gradients; see the SRBDStepFunction docstring above for details.
-# ---------------------------------------------------------------------------
-
 class SRBDModel:
+    """Differentiable Single Rigid Body Dynamics proxy used during training.
+
+    Holds no state of its own: it proxies attribute access onto the wrapped
+    ``env`` via ``__getattr__``/``__setattr__``, so ``self.srbd_p``,
+    ``self.cfg``, ``self.device`` etc. all resolve to the corresponding env
+    attributes. The class is effectively a mixin split into its own file that
+    shares ``RealQuadEnv``'s state namespace.
+
+    The hot path is :meth:`_srbd_step`, which dispatches to either the custom
+    CUDA kernel (``CUDA_KERNEL_SRBD=True`` and extension built), wrapped by
+    :class:`SRBDStepFunction` for autograd, or the pure PyTorch implementation
+    (default). Both paths produce numerically equivalent forward outputs and
+    matching gradients.
+    """
+
     def __init__(self, env):
+        """Wrap the environment whose state this model reads and writes."""
         object.__setattr__(self, 'env', env)
 
     def __getattr__(self, name):
+        """Resolve unknown attributes on the wrapped env (shared state namespace)."""
         return getattr(self.env, name)
 
     def __setattr__(self, name, value):
+        """Write attributes onto the wrapped env (except the ``env`` reference itself)."""
         if name == 'env':
             object.__setattr__(self, name, value)
         else:
             setattr(self.env, name, value)
 
     def _srbd_init_from_isaac(self):
-        """Initialize full 3D SRBD state from Isaac (batch)."""
+        """Initialise the SRBD state (p, v, q, w) from the current Isaac state.
+
+        Position/velocity are world-frame, the quaternion is wxyz, and the
+        angular velocity is rotated into the body frame (the frame the Euler
+        equation in :meth:`_srbd_step` integrates in).
+        """
         dev = self.device
         self.srbd_p = self.base_pos.clone()            # (B,3)
         self.srbd_v = self.base_lin_world.clone()      # (B,3)
@@ -134,9 +153,8 @@ class SRBDModel:
 
         self.srbd_w = quat_rotate_inverse_wxyz(self.srbd_q, self.base_ang_world, dev) # (B,3)
 
-    # Normalize quaternion to unit length
-
     def _quat_norm(self, q):
+        """Normalise quaternion(s) to unit length; supports (4,) and (B, 4)."""
         if q.dim() == 1:
             return q / (q.norm() + 1e-9)
         else:
@@ -200,9 +218,7 @@ class SRBDModel:
             ).view(1, 3)                               # (B,3)
             a = Fsum / m                                # (B,3)
 
-
-            # First use "old state" to calculate foot positions and torques
-            #p_foot = self.foot_positions_srbd(q_ref12.detach())  # (B,4,3)
+            # Foot positions from the pre-step state (torque arms use the old pose).
             p_foot = self.foot_positions_srbd(q_ref12)
 
             # Force arm vectors r: from COM to feet for the whole batch
@@ -254,25 +270,33 @@ class SRBDModel:
     # ---------------- SRBD-based foot positions ----------------
 
     def foot_positions_srbd(self, q_ref12):
-        """
-        3D SRBD foot positions (batch)
-        q_ref12: (B,12)
-        Returns (B,4,3)
+        """World-frame foot positions predicted from the SRBD state (planar leg FK).
+
+        Uses the SRBD base pose (``srbd_p``, ``srbd_q``) plus a sagittal-plane
+        two-link forward kinematics of each leg (thigh/calf angles only; the hip
+        abduction joint is neglected). Differentiable in the SRBD state and in
+        ``q_ref12`` -- this is the quantity terrain-clearance losses sample at.
+
+        Args:
+            q_ref12: (B, 12) reference joint angles (hip, thigh, calf) x 4 legs.
+
+        Returns:
+            (B, 4, 3) foot positions in the world frame (FL, FR, RL, RR).
         """
         dev = self.device
         B = self.B
         p_base = self.srbd_p          # (B,3)
         q = self.srbd_q               # (B,4)
 
+        hx, hy = float(self.cfg.hip_offset_x), float(self.cfg.hip_offset_y)
         hip_offsets = torch.tensor([
-            [ +0.1934, +0.1420, 0.0 ], # FL, FR, RL, RR
-            [ +0.1934, -0.1420, 0.0 ],
-            [ -0.1934, +0.1420, 0.0 ],
-            [ -0.1934, -0.1420, 0.0 ],
+            [ +hx, +hy, 0.0 ],        # FL, FR, RL, RR
+            [ +hx, -hy, 0.0 ],
+            [ -hx, +hy, 0.0 ],
+            [ -hx, -hy, 0.0 ],
         ], device=dev)                # (4,3)
 
-        #L1, L2 = 0.25, 0.25
-        L1, L2 = 0.213, 0.213           # this should be in the env/config --> change later on
+        L1, L2 = float(self.cfg.leg_l1), float(self.cfg.leg_l2)
 
         # Get rotation matrices for the whole batch
         R = quat_to_rot(q[:, 0], q[:, 1], q[:, 2], q[:, 3], dev) # (B,3,3)
@@ -295,6 +319,3 @@ class SRBDModel:
         off_world = torch.einsum('bij,bnj->bni', R, off_body) # (B,4,3)
 
         return hip_world + off_world                # (B,4,3)
-
-
-    # ---------------- env step ----------------

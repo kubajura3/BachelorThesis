@@ -1,27 +1,40 @@
 # Quadruped Robot Gait Training System
 
-Isaac Gym-based quadruped robot (Unitree Go2) gait control training system using SRBD (Single Rigid Body Dynamics) model and neural network policy for end-to-end training.
+Isaac Gym-based quadruped robot (Unitree Go2) gait control training system using a differentiable SRBD (Single Rigid Body Dynamics) model and a neural network policy for end-to-end training — on flat ground (blind) and on hard terrain using terrain perception (privileged height scan or a depth-camera CNN).
 
 ## Project Structure
 
 ```
-single_dog_training/
-├── config.py              # Global configuration and environment parameters
-├── utils_math.py          # Math utilities (quaternions, rotation matrices, etc.)
-├── terrain.py             # Terrain creation (flat/random rough terrain)
-├── policy.py              # Neural network policy (MLP)
-├── gait.py                # Gait planner (GaitPlanner)
-├── srbd.py                # Simplified rigid body dynamics model (SRBDModel)
-├── env.py                 # Isaac Gym simulation environment (RealQuadEnv)
-├── train.py               # Training main loop
-├── play_many_dog.py       # Policy playback script
-├── setup.py               # Build script for the SRBD CUDA extension
+BachelorThesis/
+├── config.py                    # Global configuration and environment parameters
+├── utils_math.py                # Math utilities (quaternions, rotation matrices, etc.)
+├── terrain.py                   # Terrain creation (flat / rough / Rudin curriculum grid)
+├── policy.py                    # Neural network policies (MLP + depth-CNN VisionPolicy)
+├── gait.py                      # Gait planner (GaitPlanner)
+├── srbd.py                      # Differentiable rigid body dynamics (SRBDModel)
+├── env.py                       # Isaac Gym simulation environment (RealQuadEnv)
+├── train.py                     # Training main loop (blind / height / depth modes)
+├── play_many_dog.py             # Policy playback script
+├── evaluate_rudin_comparison.py # Deterministic eval vs Rudin's PPO baseline
+├── setup.py                     # Build script for the SRBD CUDA extension
+├── go2_description.urdf         # Unitree Go2 robot model
+├── perception/                  # Terrain perception (depth camera + height sampler)
+│   ├── config.py                #   PerceptionCfg (camera, height grid, noise)
+│   ├── collector.py             #   PerceptionCollector: one collect() entry point
+│   ├── warp_camera.py           #   Warp ray-cast depth camera (CUDA-graph captured)
+│   ├── warp_kernels/cam_kernel.py #  depth kernel (vendored from MGDP, see Attribution)
+│   ├── height_sampler.py        #   differentiable height map (grid_sample)
+│   ├── terrain_mesh.py          #   terrain adapter + Warp mesh construction
+│   ├── preprocessing.py         #   depth clip/resize/normalise/noise
+│   └── visualize_perception.py  #   offline sanity-check renderer (no Isaac Gym)
 ├── tests/
-│   ├── test_srbd_kernel.py    # Forward/backward parity test for the CUDA kernel
-│   └── test_vectorization.py  # Loop-vs-batched parity (foot forces, stance)
+│   ├── test_srbd_kernel.py      # CUDA-kernel vs PyTorch parity (needs GPU + built ext)
+│   ├── test_vectorization.py    # loop-vs-batched parity (CPU)
+│   ├── test_perception_grad.py  # differentiable terrain sampling + gradients (CPU)
+│   └── test_vision_policy.py    # VisionPolicy shapes/gradients/TorchScript (CPU)
 └── src/
-    ├── srbd_ext.cpp       # pybind11 bindings for the CUDA kernel
-    └── srbd_cuda.cu       # Fused CUDA kernel: foot FK + SRBD dynamics step
+    ├── srbd_ext.cpp             # pybind11 bindings for the CUDA kernel
+    └── srbd_cuda.cu             # Fused CUDA kernel: foot FK + SRBD dynamics step
 ```
 
 ## Features
@@ -41,15 +54,18 @@ single_dog_training/
 - **Domain Randomization** (optional, independent per-env switches): velocity command (`rand_cmd`), gait (`gait_mode = -1` + `gait_choices`), step frequency (`rand_step_freq`), and terrain + spawn placement (`terrain_type`, `rand_spawn_xy`). All robots share one terrain surface and spawn at the correct local terrain height under their own (x, y)
 - **GPU Acceleration**: Uses Isaac Gym's GPU physics pipeline
 - **Custom CUDA Kernel for SRBD** (optional): Fused kernel that replaces the per-step PyTorch ops with a single launch; toggled via `CUDA_KERNEL_SRBD` in `config.py`. Backward compatibility with autograd is preserved (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional))
+- **Terrain Perception** (optional, `use_perception`): a forward Warp ray-cast depth camera and a differentiable 187-point local height scan gathered every step (`env.collect_perception()`), all GPU-resident and CUDA-graph captured
+- **Three training modes** (one switch, see [Training](#training)): blind 36-D observation on flat ground; privileged height-scan observation (36+187-D) on the Rudin curriculum terrain; or a depth-camera **VisionPolicy** whose CNN encoder is trained end-to-end through the SRBD rollout
 
 ### Loss Functions
 Training uses a weighted combination of multiple losses:
 - `loss_v`: Velocity tracking (vx, vy)
-- `loss_h`: Height maintenance (target 0.35m)
-- `loss_omega`: Angular velocity regularization
+- `loss_h`: Height maintenance (target 0.35 m; terrain-*relative* in the perception modes, sampled differentiably at the SRBD position so terrain slope back-propagates)
+- `loss_omega`: Angular velocity regularization + yaw-rate tracking
 - `loss_ctrl`: Control input regularization
 - `loss_gproj`: Gravity projection (keep body level)
 - `loss_foot`: Foot position tracking
+- `loss_clear`: Swing-foot terrain clearance (perception modes only): penalises swing feet below terrain + margin, sampled at differentiable SRBD foot positions on a Gaussian-blurred heightfield
 - `loss_yaw`: Yaw angle maintenance
 
 ## Requirements
@@ -61,6 +77,7 @@ Training uses a weighted combination of multiple losses:
 - NumPy
 - Matplotlib
 - tqdm
+- warp-lang (only for the perception / vision modes: `pip install warp-lang`)
 
 ### Optional (only for the custom SRBD CUDA kernel)
 - CUDA Toolkit matching your PyTorch build (`nvcc --version` must work)
@@ -81,13 +98,42 @@ pip install -e .
 ### Training
 
 ```bash
-# Basic training (1000 iterations, 24 steps each)
+# Blind baseline: flat ground, 36-D observation (1000 iterations, 24 steps each)
 python3 train.py
 
-# After training completes, the following files are generated in the results/ folder:
-# - results/quad_diffsim_srbd_align_multi_robot.pth  (model weights)
-# - results/quad_diffsim_srbd_align_multi_robot.pt   (TorchScript model for deployment)
-# - results/ Various training curves (loss_*.png, vx_curve_*.png, etc.)
+# Stage 1: Rudin curriculum terrain + privileged height-scan observation (36+187-D)
+#          + terrain-aware differentiable losses. Outputs get the "_height" tag.
+PERCEPTION_TERRAIN=1 python3 train.py
+
+# Stage 2: Rudin terrain + VisionPolicy (36-D obs + depth image through a CNN,
+#          trained end-to-end through the SRBD rollout). Outputs get "_vision".
+PERCEPTION_TERRAIN=depth python3 train.py
+
+# Files generated in results/ (tag = "", "_height" or "_vision" by mode):
+# - results/quad_diffsim_srbd_align_multi_robot<tag>.pth  (model weights)
+# - results/quad_diffsim_srbd_align_multi_robot<tag>.pt   (TorchScript export)
+# - results/ training curves (loss_*<tag>.png, vx_curve_*<tag>.png, ...)
+```
+
+### Evaluation (comparison against Rudin's PPO baseline)
+
+Deterministic rollout on the Rudin curriculum terrain, reporting the metrics
+legged_gym logs (`mean_terrain_level`, tracking errors, fall rate, ...):
+
+```bash
+python3 evaluate_rudin_comparison.py --obs-mode blind  --weights results/quad_diffsim_srbd_align_multi_robot.pth         --tag diffsim_blind
+python3 evaluate_rudin_comparison.py --obs-mode height --weights results/quad_diffsim_srbd_align_multi_robot_height.pth  --tag diffsim_height
+python3 evaluate_rudin_comparison.py --obs-mode depth  --weights results/quad_diffsim_srbd_align_multi_robot_vision.pth  --tag diffsim_vision
+```
+
+`--obs-mode` must match how the weights were trained. Results are written to
+`results/eval_results_<tag>.json/.csv`.
+
+### Perception sanity check (no Isaac Gym required)
+
+```bash
+python3 -m perception.visualize_perception                    # synthetic scene, auto device
+python3 -m perception.visualize_perception --device cpu       # CPU-only
 ```
 
 ### Playing Trained Policy
@@ -156,10 +202,20 @@ Main configuration in `EnvCfg` class in `config.py`:
 - `alpha_align = 0.9`: SRBD alignment coefficient
 - `train_no_aerial = True`: Disable aerial phase during training (warm-up)
 
+### Perception & terrain-gradient switches (EnvCfg)
+- `use_perception = False`: build the terrain-perception collector (depth camera + height sampler); required by the three flags below
+- `use_height_obs = False`: append the 187-point height scan to the observation (obs 36 -> 223)
+- `use_depth_obs = False`: vision-policy mode — depth image is a separate CNN input (obs stays 36-D); mutually exclusive with `use_height_obs`
+- `use_terrain_loss = False`: terrain-relative height loss + swing-foot clearance loss, sampled differentiably at SRBD-predicted positions
+- `perception`: a `PerceptionCfg` with camera intrinsics/mounting, height-grid extent and the loss-field blur (`hm_loss_blur_cells`)
+
+The `PERCEPTION_TERRAIN` environment variable in `train.py` sets these
+consistently per mode, so they rarely need to be touched by hand.
+
 ### Global Switches
 - `PURE_PAPER_MODE = True`: Pure paper version (no engineering tricks)
 - `ONLY_ITERATE_NO_RESET = True`: Only reset on first iteration
-- `CUDA_KERNEL_SRBD = False`: Use the custom fused CUDA kernel for `_srbd_step`. `False` = pure PyTorch (default, always works). `True` = CUDA kernel (requires `python setup.py build_ext --inplace` first; see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional)).
+- `CUDA_KERNEL_SRBD` (default `True` in `config.py`): Use the custom fused CUDA kernel for `_srbd_step`. Requires `python setup.py build_ext --inplace` once; if the extension is missing the code prints a warning and falls back to the pure-PyTorch path automatically, so the flag is always safe. Set `False` to force the PyTorch reference implementation (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional)).
 
 ## Training Output
 
@@ -167,8 +223,11 @@ After training completes, the following files are generated in the `results/` fo
 (this folder is git-ignored — only source code, the README and the URDF are tracked):
 
 ### Model Files
-- `results/quad_diffsim_srbd_align_multi_robot.pth`: PyTorch model weights
-- `results/quad_diffsim_srbd_align_multi_robot.pt`: TorchScript model (for ROS2 deployment)
+- `results/quad_diffsim_srbd_align_multi_robot<tag>.pth`: PyTorch model weights
+- `results/quad_diffsim_srbd_align_multi_robot<tag>.pt`: TorchScript model (for ROS2 deployment)
+
+`<tag>` is empty for blind runs, `_height` for the height-scan mode and
+`_vision` for the depth-CNN mode, so the three modes never overwrite each other.
 
 ### Training Curves
 - `results/loss_curve_srbd_align.png`: Total loss curve
@@ -186,12 +245,14 @@ After training completes, the following files are generated in the `results/` fo
 
 - **config.py**: Centralized management of all configuration parameters and global switches
 - **utils_math.py**: Provides quaternion, rotation matrix, gravity projection and other math utilities
-- **terrain.py**: Creates flat or random rough terrain; for rough terrain it returns a `TerrainData` (heightfield + scales/offsets) so the env can look up surface height at any (x, y) for spawn placement
-- **policy.py**: Defines neural network policy (36-dim input → 256×256 → 12-dim output)
+- **terrain.py**: Creates flat / rough / Rudin-curriculum terrain; non-flat terrain returns a `TerrainData` (heightfield + scales/offsets + world-frame mesh) so the env can look up surface height at any (x, y) and perception can ray-cast the exact PhysX surface
+- **policy.py**: Neural network policies — blind MLP (`Policy`) and depth-CNN vision policy (`DepthEncoder` + `VisionPolicy`)
 - **gait.py**: `GaitPlanner` class, handles gait planning, phase management, foothold calculation
-- **srbd.py**: `SRBDModel` class, implements simplified rigid body dynamics forward propagation
-- **env.py**: `RealQuadEnv` class, wraps Isaac Gym simulation environment
+- **srbd.py**: `SRBDModel` class, implements differentiable rigid body dynamics forward propagation
+- **env.py**: `RealQuadEnv` class, wraps Isaac Gym simulation environment (+ optional perception collector)
+- **perception/**: Self-contained terrain-perception package (Warp depth camera + differentiable height sampling); no Isaac Gym dependency, works standalone
 - **train.py**: Training main loop, includes loss calculation, backpropagation, model saving
+- **evaluate_rudin_comparison.py**: Deterministic evaluation producing metrics directly comparable to Rudin's legged_gym logs
 
 ### Key Design Patterns
 
@@ -222,8 +283,8 @@ The per-step centroidal dynamics in `SRBDModel._srbd_step` can run through eithe
 
 ```python
 # config.py
-CUDA_KERNEL_SRBD = False   # PyTorch (default — always works, no build step)
-CUDA_KERNEL_SRBD = True    # Custom fused CUDA kernel (requires building the extension)
+CUDA_KERNEL_SRBD = True    # Custom fused CUDA kernel (default; falls back to PyTorch if not built)
+CUDA_KERNEL_SRBD = False   # Pure PyTorch reference path (always works, no build step)
 ```
 
 When `True`, `srbd.py` imports the compiled `srbd_cuda_ext` module and dispatches both directions through a `torch.autograd.Function` wrapper (`SRBDStepFunction`):
@@ -562,6 +623,8 @@ A: After training, use the TorchScript model:
 model = torch.jit.load("results/quad_diffsim_srbd_align_multi_robot.pt")
 action = model(observation)  # (1, 36) -> (1, 12)
 ```
+The height-mode export takes a (1, 223) observation, and the vision-mode export
+(`..._vision.pt`) takes two inputs: `(obs (1, 36), depth (1, 1, 12, 16))`.
 
 ### Q: `CUDA_KERNEL_SRBD = True` but I see the fallback warning?
 A: The extension hasn't been built (or not in the current Python environment). From the project root:
@@ -573,26 +636,54 @@ This produces `srbd_cuda_ext*.so` / `*.pyd` next to `srbd.py`. After that, set `
 ### Q: Do I need to rebuild the extension after every code change?
 A: Only after modifying `src/srbd_cuda.cu`, `src/srbd_ext.cpp`, or `setup.py`. Changes to `srbd.py` or any other `.py` file do **not** require a rebuild — just re-run `python train.py`.
 
+## Tests
+
+```bash
+# CPU-only, no Isaac Gym required:
+python tests/test_vectorization.py     # loop-vs-batched parity (foot forces, stance)
+python tests/test_perception_grad.py   # differentiable terrain sampling values + gradients
+python tests/test_vision_policy.py     # VisionPolicy shapes, encoder gradients, TorchScript
+
+# GPU + built extension required:
+python tests/test_srbd_kernel.py       # CUDA kernel vs PyTorch parity (fwd/bwd/autograd)
+```
+
+## Third-Party Code & Attribution
+
+Parts of this repository are ported from or based on prior work:
+
+- **legged_gym** (Rudin et al., *"Learning to Walk in Minutes Using Massively
+  Parallel Deep Reinforcement Learning"*, CoRL 2021;
+  https://github.com/leggedrobotics/legged_gym): the curriculum-grid terrain
+  generation in `terrain.py` (`Terrain` class, `gap_terrain`, `pit_terrain`)
+  is ported verbatim, and the terrain curriculum / robot-placement logic in
+  `env.py` (`_assign_rudin_origins`, `_update_terrain_curriculum`) is a close
+  port. Copyright (c) 2021 ETH Zurich, Nikita Rudin — BSD-3-Clause; that
+  license continues to apply to the ported portions. The 187-point height-scan
+  layout and the evaluation metrics also follow this project.
+- **MGDP** (`warp_sensor`): the depth ray-cast kernel
+  (`perception/warp_kernels/cam_kernel.py`) is a trimmed, self-contained copy
+  of MGDP's depth kernel, and the camera wrapper / depth post-processing in
+  `perception/` are adapted from the same project.
+- **DiffPhysDrone** (Zhang et al.): the end-to-end depth-CNN training approach
+  and the 12x16 depth input scale are inspired by this work (concepts only, no
+  code copied).
+
 ## Citation
 
-If you use this code, please cite the relevant paper (fill in according to your actual paper):
-
-```bibtex
-@article{your_paper,
-  title={Your Paper Title},
-  author={Your Name},
-  journal={Your Journal},
-  year={2024}
-}
-```
+If you use this code, please cite the associated thesis (details to be added
+upon publication).
 
 ## License
 
-(Fill in according to your project license)
+Not yet licensed — a license will be added at the end of the project. Until
+then all rights are reserved for the original code; the third-party portions
+listed above retain their respective licenses (BSD-3-Clause for the
+legged_gym-derived code).
 
 ## Contact
 
-(Fill in according to your contact information)
+Jakub Jura — kuba.jura3@gmail.com
 
 ---
 

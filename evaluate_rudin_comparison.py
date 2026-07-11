@@ -27,7 +27,7 @@ import csv
 import json
 import argparse
 
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi  # noqa: F401
 except Exception:
@@ -35,29 +35,33 @@ except Exception:
 
 import torch
 
-from config import EnvCfg, PURE_PAPER_MODE
+from config import EnvCfg
 from env import RealQuadEnv
-from policy import Policy
+from policy import Policy, VisionPolicy
 from utils_math import set_seed
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 
-def load_policy(weight_path: str, device: torch.device,
-                dim_obs: int = 36, dim_action: int = 12) -> Policy:
-    """Build Policy and load weights (mirrors play_many_dog.load_policy)."""
-    policy = Policy(dim_obs, dim_action).to(device)
+def load_policy(policy: torch.nn.Module, weight_path: str, device: torch.device) -> torch.nn.Module:
+    """Load weights into an already-built policy (Policy or VisionPolicy).
+
+    The caller constructs the right class/obs-dim for the chosen --obs-mode; this
+    just loads the state dict (mirrors play_many_dog.load_policy otherwise).
+    """
+    policy = policy.to(device)
     if os.path.isfile(weight_path):
         state = torch.load(weight_path, map_location=device)
         policy.load_state_dict(state)
-        print(f"✅ Loaded policy weights from {weight_path}.")
+        print(f"[eval] Loaded policy weights from {weight_path}.")
     else:
-        print(f"⚠️ Weight file {weight_path} not found, using randomly initialized policy.")
+        print(f"[eval] WARNING: weight file {weight_path} not found, using randomly initialized policy.")
     policy.eval()
     return policy
 
 
 def parse_args():
+    """Command-line arguments for the deterministic Rudin-terrain evaluation."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--weights", type=str,
@@ -73,6 +77,10 @@ def parse_args():
                    help="Steps to ignore before accumulating metrics (lets the curriculum settle).")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--obs-mode", type=str, default="blind", choices=["blind", "height", "depth"],
+                   help="Policy input: blind 36-D obs, 36+187 privileged height scan, or "
+                        "36-D obs + depth image through the VisionPolicy CNN. Must match "
+                        "how the weights were trained.")
     p.add_argument("--tag", type=str, default="diffsim",
                    help="Label for the output files (eval_results_<tag>.json/.csv).")
     p.add_argument("--out", type=str, default=RESULTS_DIR,
@@ -82,6 +90,7 @@ def parse_args():
 
 @torch.no_grad()
 def main():
+    """Run the evaluation rollout and write eval_results_<tag>.json/.csv."""
     args = parse_args()
     if args.warmup >= args.steps:
         raise SystemExit(f"--warmup ({args.warmup}) must be < --steps ({args.steps}).")
@@ -96,10 +105,20 @@ def main():
     cfg.num_envs = args.num_envs
     cfg.use_viewer = False
     cfg.use_gpu_pipeline = True
+    if args.obs_mode != "blind":
+        cfg.use_perception = True
+        if args.obs_mode == "height":
+            cfg.use_height_obs = True
+        else:
+            cfg.use_depth_obs = True
 
     env = RealQuadEnv(cfg, device=device)
     env.reset()
-    policy = load_policy(args.weights, device)
+    if args.obs_mode == "depth":
+        policy = VisionPolicy(dim_obs=env.obs_dim, dim_action=12)
+    else:
+        policy = Policy(dim_obs=env.obs_dim, dim_action=12)
+    policy = load_policy(policy, args.weights, device)
 
     B = env.B
     num_rows = int(cfg.rudin_terrain.num_rows)
@@ -118,13 +137,17 @@ def main():
     a_prev = torch.zeros(B, 12, device=device)
     hx_hold = None
 
-    print(f"▶ Evaluating on Rudin terrain: B={B}, seed={args.seed}, "
+    print(f"[eval] Evaluating on Rudin terrain: B={B}, seed={args.seed}, "
           f"steps={args.steps}, warmup={args.warmup}, episode_length_s={cfg.episode_length_s}")
 
     for t in range(args.steps):
         s = env.get_obs().to(device)
         if (t % cfg.action_hold) == 0:
-            a, hx = policy(s, hx)
+            if args.obs_mode == "depth":
+                perc = env.collect_perception()
+                a, hx = policy(s, perc["depth_clean"], hx)
+            else:
+                a, hx = policy(s, hx)
             a_prev = a
             hx_hold = hx
         else:
@@ -162,6 +185,7 @@ def main():
     results = {
         "tag": args.tag,
         "config": {
+            "obs_mode": args.obs_mode,
             "num_envs": B,
             "seed": args.seed,
             "steps": args.steps,
@@ -206,7 +230,7 @@ def main():
         w.writerow(list(flat.keys()))
         w.writerow(list(flat.values()))
 
-    print(f"\n💾 Wrote {json_path}\n💾 Wrote {csv_path}")
+    print(f"\n[eval] Wrote {json_path}\n[eval] Wrote {csv_path}")
 
 
 if __name__ == "__main__":

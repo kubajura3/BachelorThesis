@@ -1,4 +1,30 @@
-# ---------------- Isaac Gym ----------------
+"""Terrain construction for the shared simulation surface.
+
+Three terrain types, selected via ``EnvCfg.terrain_type``:
+
+* ``"flat"``  -- a PhysX ground plane (:func:`create_ground_plane`);
+* ``"rough"`` -- one large random-uniform heightfield converted to a trimesh
+  (:func:`create_random_rough_terrain`);
+* ``"rudin"`` -- the curriculum-grid landscape from Rudin et al.
+  (:func:`create_rudin_terrain`), rows = increasing difficulty, columns =
+  terrain-type variety.
+
+Every non-flat builder returns a :class:`TerrainData` so the environment can
+look up the surface height under any world (x, y) (spawn placement) and so the
+perception module can ray-cast the exact world-frame mesh handed to PhysX.
+
+Third-party attribution
+-----------------------
+The :class:`Terrain` class and the :func:`gap_terrain` / :func:`pit_terrain`
+helpers are ported from **legged_gym** (Rudin et al., "Learning to Walk in
+Minutes Using Massively Parallel Deep Reinforcement Learning";
+https://github.com/leggedrobotics/legged_gym, file
+``legged_gym/utils/terrain.py``), Copyright (c) 2021 ETH Zurich, Nikita Rudin,
+released under the BSD-3-Clause license. That copyright notice applies to the
+ported portions of this file. :func:`create_rudin_terrain` adapts legged_gym's
+mesh-placement conventions to this environment.
+"""
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -38,6 +64,11 @@ class TerrainData:
 
 
 def _setup_physx_stable(sim_params, use_gpu=True):
+    """Apply conservative PhysX solver settings for stable quadruped contact.
+
+    Every assignment is guarded with ``hasattr`` so the function works across
+    Isaac Gym preview versions that expose different parameter sets.
+    """
     if hasattr(sim_params, "substeps"):
         sim_params.substeps = 3
     if not hasattr(sim_params, "physx"):
@@ -75,32 +106,37 @@ def _setup_physx_stable(sim_params, use_gpu=True):
 
 # ================== Terrain Creation Tools ==================
 def create_ground_plane(gym, sim):
-    """Wrap the original flat ground plane into a small function."""
+    """Add a flat PhysX ground plane to the simulation.
+
+    Returns:
+        None -- there is no heightfield to sample, so the env spawns at z = h0.
+    """
     plane_params = gymapi.PlaneParams()
     plane_params.normal = gymapi.Vec3(0, 0, 1)
     plane_params.static_friction = 1.0
     plane_params.dynamic_friction = 1.0
     plane_params.restitution = 0.0
-    print("DEBUG 3: before add_ground", flush=True)
+    print("[terrain] adding flat ground plane", flush=True)
     gym.add_ground(sim, plane_params)
-    print("DEBUG 4: after add_ground", flush=True)
-    # Flat plane: no heightfield to sample -> spawn height is just h0.
+    print("[terrain] ground plane added", flush=True)
     return None
 
 
 def create_random_rough_terrain(gym, sim):
-    """
-    Use isaacgym.terrain_utils to create a large random rough terrain,
-    then convert to triangle mesh and add to PhysX.
+    """Create one large random-uniform heightfield terrain and add it to PhysX.
 
-    For “approximately infinite”, we create an 80m x 80m large terrain,
-    centered at (0,0), with robots spawning near the center.
+    Builds a 200 m x 200 m terrain centred at (0, 0) with gentle +-2 cm
+    undulations -- effectively infinite for robots spawning near the centre.
+
+    Returns:
+        TerrainData with the heightfield (for spawn-height lookup) and the
+        world-frame trimesh (for perception ray-casting).
     """
     # Scale parameters
     horizontal_scale = 0.25   # Each heightfield cell is 0.25m
     vertical_scale = 0.005    # Each height unit is 0.005m
 
-    terrain_size = 200        # 80m x 80m
+    terrain_size = 200        # side length in metres
     num_rows = int(terrain_size / horizontal_scale)
     num_cols = int(terrain_size / horizontal_scale)
 
@@ -150,14 +186,14 @@ def create_random_rough_terrain(gym, sim):
     tm_params.dynamic_friction = 1.0
     tm_params.restitution = 0.0
 
-    print("DEBUG 3: before add_triangle_mesh", flush=True)
+    print("[terrain] adding rough-terrain triangle mesh", flush=True)
     gym.add_triangle_mesh(
         sim,
         vertices.flatten(order="C"),
         triangles.flatten(order="C"),
         tm_params,
     )
-    print("DEBUG 4: after add_triangle_mesh", flush=True)
+    print("[terrain] rough-terrain mesh added", flush=True)
 
     # Retain the heightfield + scales/offsets so the env can sample surface height at any (x, y),
     # plus the WORLD-FRAME mesh (offset baked in) so perception ray-casts the exact PhysX surface.
@@ -176,13 +212,21 @@ def create_random_rough_terrain(gym, sim):
 
 
 # ================== Rudin curriculum-grid terrain ==================
-# Ported verbatim from legged_gym (Rudin et al., "Learning to Walk in Minutes ..."):
-# legged_gym/legged_gym/utils/terrain.py. Builds one big heightfield arranged as a grid
-# where rows = increasing difficulty and columns = terrain-type variety, plus the per-cell
-# spawn origins. Copyright (c) 2021 ETH Zurich, Nikita Rudin (BSD-3-Clause).
 class Terrain:
-    def __init__(self, cfg, num_robots) -> None:
+    """Curriculum-grid heightfield, ported verbatim from legged_gym.
 
+    Source: ``legged_gym/legged_gym/utils/terrain.py`` (Rudin et al.,
+    "Learning to Walk in Minutes Using Massively Parallel Deep Reinforcement
+    Learning"), Copyright (c) 2021 ETH Zurich, Nikita Rudin, BSD-3-Clause.
+    Builds one big heightfield arranged as a grid where rows = increasing
+    difficulty and columns = terrain-type variety, plus the per-cell spawn
+    origins. Only docstrings were added here; the logic (including the
+    ``curiculum``/``slope_treshold`` spellings) is kept identical to upstream
+    for easy diffing.
+    """
+
+    def __init__(self, cfg, num_robots) -> None:
+        """Build the full heightfield grid (and trimesh for mesh_type='trimesh')."""
         self.cfg = cfg
         self.num_robots = num_robots
         self.type = cfg.mesh_type
@@ -218,6 +262,7 @@ class Terrain:
                                                                                             self.cfg.slope_treshold)
 
     def randomized_terrain(self):
+        """Fill every grid cell with a random terrain type at random difficulty."""
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
@@ -228,6 +273,7 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
 
     def curiculum(self):
+        """Curriculum layout: difficulty grows along rows, type varies along columns."""
         for j in range(self.cfg.num_cols):
             for i in range(self.cfg.num_rows):
                 difficulty = i / self.cfg.num_rows
@@ -237,6 +283,7 @@ class Terrain:
                 self.add_terrain_to_map(terrain, i, j)
 
     def selected_terrain(self):
+        """Fill the whole grid with one hand-picked terrain (cfg.terrain_kwargs)."""
         terrain_type = self.cfg.terrain_kwargs.pop('type')
         for k in range(self.cfg.num_sub_terrains):
             # Env coordinates in the world
@@ -252,6 +299,7 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
 
     def make_terrain(self, choice, difficulty):
+        """Create one sub-terrain cell; ``choice`` picks the type, ``difficulty`` its severity."""
         terrain = terrain_utils.SubTerrain(   "terrain",
                                 width=self.width_per_env_pixels,
                                 length=self.width_per_env_pixels,
@@ -290,6 +338,7 @@ class Terrain:
         return terrain
 
     def add_terrain_to_map(self, terrain, row, col):
+        """Blit a sub-terrain into the big heightfield and record its spawn origin."""
         i = row
         j = col
         # map coordinate system
@@ -310,6 +359,7 @@ class Terrain:
 
 
 def gap_terrain(terrain, gap_size, platform_size=1.):
+    """Ring-shaped gap around a central platform (from legged_gym)."""
     gap_size = int(gap_size / terrain.horizontal_scale)
     platform_size = int(platform_size / terrain.horizontal_scale)
 
@@ -325,6 +375,7 @@ def gap_terrain(terrain, gap_size, platform_size=1.):
 
 
 def pit_terrain(terrain, depth, platform_size=1.):
+    """Square pit of the given depth at the cell centre (from legged_gym)."""
     depth = int(depth / terrain.vertical_scale)
     platform_size = int(platform_size / terrain.horizontal_scale / 2)
     x1 = terrain.length // 2 - platform_size
@@ -366,14 +417,14 @@ def create_rudin_terrain(gym, sim, rudin_cfg, num_robots):
     tm_params.dynamic_friction = 1.0
     tm_params.restitution = 0.0
 
-    print("DEBUG 3: before add_triangle_mesh (rudin)", flush=True)
+    print("[terrain] adding Rudin curriculum-grid triangle mesh", flush=True)
     gym.add_triangle_mesh(
         sim,
         terrain.vertices.flatten(order="C"),
         terrain.triangles.flatten(order="C"),
         tm_params,
     )
-    print("DEBUG 4: after add_triangle_mesh (rudin)", flush=True)
+    print("[terrain] Rudin curriculum-grid mesh added", flush=True)
 
     # World-frame mesh (offset baked in) for perception ray-casting; the trimesh already
     # has proper vertical faces for stairs/steps thanks to slope_treshold.

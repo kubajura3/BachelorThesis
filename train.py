@@ -1,6 +1,21 @@
+"""Training entry point: differentiable-SRBD policy optimisation.
+
+Rolls the policy out for ``steps_per_iter`` control steps per iteration --
+Isaac Gym provides the ground-truth physics, the SRBD model re-integrates the
+estimated contact forces differentiably, and the two are blended by
+alpha-alignment (value from Isaac, gradient corridor from SRBD). The loss is
+assembled from the SRBD states and backpropagated through the whole rollout
+into the policy (and, in depth mode, into the vision encoder).
+
+Run modes (also selectable via the PERCEPTION_TERRAIN environment variable):
+    blind (default)          -- flat terrain, 36-D observation
+    perception_terrain=True  -- Rudin terrain, 36+187-D obs + terrain losses
+    depth_policy=True        -- Rudin terrain, VisionPolicy (obs + depth CNN)
+"""
+
 import os
 
-# ⚠️ CRITICAL: Isaac Gym must be imported BEFORE torch
+# NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
 try:
     from isaacgym import gymapi
 except Exception:
@@ -18,11 +33,9 @@ import matplotlib.pyplot as plt
 
 from config import EnvCfg, ONLY_ITERATE_NO_RESET, PURE_PAPER_MODE
 from env import RealQuadEnv
-from policy import Policy
+from policy import Policy, VisionPolicy
 from utils_math import (
     moving_average,
-    project_gravity_to_body,
-    quat_rotate_inverse_wxyz,
     quat_to_rot,
     set_seed,
 )
@@ -34,40 +47,80 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 def train(num_iters=1000, steps_per_iter=24,
           device="cuda" if torch.cuda.is_available() else "cpu",
           seed: int = None, smooth_k: int = 25,
-          perception_terrain: bool = False):
+          perception_terrain: bool = False,
+          depth_policy: bool = False):
+    """Train the policy and save weights, TorchScript export and curves to results/.
 
+    Args:
+        num_iters: Outer training iterations (one optimiser step each).
+        steps_per_iter: Control steps rolled out (and backpropagated through)
+            per iteration.
+        device: Torch device.
+        seed: RNG seed (falls back to the SEED environment variable, then 0).
+        smooth_k: Moving-average window for the smoothed curves.
+        perception_terrain: Stage-1 mode -- Rudin terrain, privileged height
+            scan in the observation, terrain-aware losses.
+        depth_policy: Stage-2 mode -- Rudin terrain, VisionPolicy consuming the
+            depth camera through a CNN, terrain-aware losses.
+    """
     if seed is None: seed = int(os.getenv("SEED", 0))
     set_seed(seed)
 
     cfg = EnvCfg()
-    cfg.trot_style = "normal"   # or "normal" / "run"
-    cfg.rand_cmd = False          # ✅ Enable random velocity commands
-    cfg.vx_min = +0.5        # You can change to paper's command range
+    cfg.trot_style = "normal"      # "normal" / "walk" / "run"
+    cfg.rand_cmd = False           # fixed command below (set True for per-env random commands)
+    cfg.vx_min = +0.5
     cfg.vx_max = +0.5
     cfg.train_no_aerial = True
 
-    # Perception / hard-terrain training: Rudin curriculum terrain, 36+187-D obs
-    # (height scan) and the terrain-aware differentiable losses (terrain-relative
-    # height + swing-foot clearance sampled at SRBD-predicted positions).
-    if perception_terrain:
+    # Perception / hard-terrain training on the Rudin curriculum terrain with the
+    # terrain-aware differentiable losses (terrain-relative height + swing-foot
+    # clearance sampled at SRBD-predicted positions). Two policy-input variants:
+    #   perception_terrain -> 36+187-D obs (privileged height scan, stage 1)
+    #   depth_policy       -> 36-D obs + depth image through a CNN (stage 2)
+    if perception_terrain or depth_policy:
         cfg.terrain_type = "rudin"
         cfg.use_perception = True
-        cfg.use_height_obs = True
         cfg.use_terrain_loss = True
+        if depth_policy:
+            cfg.use_depth_obs = True
+        else:
+            cfg.use_height_obs = True
 
     if PURE_PAPER_MODE:
         cfg.use_paper_raibert = True
 
     env = RealQuadEnv(cfg, device=device)
     B = env.B
-    model = Policy(dim_obs=env.obs_dim, dim_action=12).to(device)
-    opt = AdamW(model.parameters(), lr=1e-3)  # Further reduce learning rate
-    
-    a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01 ,0.5, 5.0
-    a7 = 3.0   # swing-foot terrain-clearance weight (only used with cfg.use_terrain_loss)
+    if depth_policy:
+        model = VisionPolicy(dim_obs=env.obs_dim, dim_action=12).to(device)
+    else:
+        model = Policy(dim_obs=env.obs_dim, dim_action=12).to(device)
+
+    def policy_act(s, hx):
+        """One policy call; in depth mode also captures the camera this step.
+
+        The CNN forward runs here, inside the grad-enabled rollout (not in the
+        no_grad get_obs), so the encoder weights land on the autograd graph and
+        receive gradients through the action -> SRBD -> loss chain. depth_clean
+        is a fresh tensor per capture, so holding it across the BPTT window is
+        safe even though the raw pixel buffer is reused in place.
+        """
+        if depth_policy:
+            perc = env.collect_perception()
+            return model(s, perc["depth_clean"], hx)
+        return model(s, hx)
+
+    # Tag output files by run mode so blind / height / vision runs don't overwrite
+    # each other's curves and weights.
+    run_tag = "_vision" if depth_policy else ("_height" if perception_terrain else "")
+    opt = AdamW(model.parameters(), lr=1e-3)
+
+    # Loss weights: velocity, height, angular velocity, control effort,
+    # gravity projection, foot tracking, terrain clearance (terrain mode only).
+    a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01, 0.5, 5.0
+    a7 = 3.0
     use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
-     
-  
 
     pbar = tqdm(range(num_iters), ncols=92)
     losses = []; rewards = []
@@ -101,7 +154,6 @@ def train(num_iters=1000, steps_per_iter=24,
                 model.reset()
 
         episodic_reward = 0.0
-        stuck_counter = 0
 
         v_world_hist = []
         q_body_hist  = []
@@ -110,9 +162,8 @@ def train(num_iters=1000, steps_per_iter=24,
         omega_hist, gproj_hist = [], []
         foot_ref_hist = []
         clearance_hist = []
-        tilt_hist = []
-        cmd_hist = []       # ★ Record high-level velocity command at each step [vx_cmd, vy_cmd, yaw_cmd]
-        
+        cmd_hist = []       # per-step high-level command [vx_cmd, vy_cmd, yaw_cmd]
+
 
         hx = None
         hx_hold = None
@@ -128,7 +179,7 @@ def train(num_iters=1000, steps_per_iter=24,
             # RNN / action_hold logic (keep as is)
             if PURE_PAPER_MODE:
                 if (t % cfg.action_hold) == 0:
-                    a, hx = model(s, hx)   # (B,12)
+                    a, hx = policy_act(s, hx)   # (B,12)
                     a_prev = a
                     hx_hold = hx.detach() if hx is not None else None
                 else:
@@ -136,7 +187,7 @@ def train(num_iters=1000, steps_per_iter=24,
                     hx = hx_hold
             else:
                 if (t % cfg.action_hold) == 0:
-                    a_raw, hx = model(s, hx)
+                    a_raw, hx = policy_act(s, hx)
                     a_smooth = 0.7 * a_prev + 0.3 * a_raw
                     a_prev = a_smooth.detach()
                     hx_hold = hx.detach() if hx is not None else None
@@ -145,25 +196,10 @@ def train(num_iters=1000, steps_per_iter=24,
                     a = a_prev
                     hx = hx_hold
 
- #-------------------IsaacGym simulation one step----------------
+            # ------------------- Isaac Gym simulation, one control step -------------------
             obs, extra, q_err, qref = env.step(a)
 
-
- #------------------SRBD step ----------------
-            # Stuck detection (only watch robot 0)
-            v_body_now0 = env.base_lin_body[0]
-            if (v_body_now0.norm() < 0.02) and (env.base_pos[0,2] < 0.20):
-                stuck_counter += 1
-            else:
-                stuck_counter = 0
-
-            # Foot kinematics
-            J = env.foot_jacobians()  # (B,4,3,dof)
-            dof_offset = getattr(env, "jac_dof_offset", 0)
-            J_ctrl = J[..., env.ctrl_idx_t + dof_offset]      # (B,4,3,12)
-            qd12 = env.qd[:, env.ctrl_idx_t]                  # (B,12)
-            v_foot = torch.einsum('bfkj,bj->bfk', J_ctrl, qd12)  # (B,4,3)
-
+            # ------------------- gait plan for this step -------------------
             p_foot = env.foot_positions()                     # (B,4,3)
 
             # Phase (B,4)
@@ -172,23 +208,19 @@ def train(num_iters=1000, steps_per_iter=24,
             else:
                 phase_offsets = env.leg_phase_offsets.view(1,4).repeat(B,1)
             phases = phase_offsets + env.phase.view(B,1)      # (B,4)
-            # ✅ Use new “stance+swing+Raibert” function to get foot target and stance_mask
+            # Stance/swing masks + foot targets from the gait planner (Raibert touchdown).
             pref, stance_mask, vref_foot = env.gait._update_foot_targets_from_command(
                 phases, p_foot, return_vref=True
             )
             swing_mask  = 1.0 - stance_mask                   # (B,4,1)
 
-            # ===== Swing/stance loss =====
-            # 1) Swing leg “should lift above swing_height”
-            clearance = p_foot[:,:,2:3] - env.last_contact_z.unsqueeze(-1)  # (B,4,1)
+            # Per-env swing-height target, reused by the clearance loss below.
             if hasattr(env, "swing_height_B"):
                 h_tar = env.swing_height_B.view(B, 1, 1)                     # (B,1,1)
             else:
                 h_tar = torch.full((B,1,1), env.cfg.swing_height, device=env.device)
 
-
-
-            # SRBD step + α alignment
+            # ------------------- SRBD step + alpha alignment -------------------
             q12      = env.q[:, env.ctrl_idx_t]          # (B,12)
             qd12_now = env.qd[:, env.ctrl_idx_t]
             f_est = env.estimate_foot_forces(q_ref12=qref,
@@ -196,9 +228,9 @@ def train(num_iters=1000, steps_per_iter=24,
                                              qd_now12=qd12_now.detach(),
                                              stance_mask=stance_mask.detach())
             env.srbd._srbd_step(f_world=f_est, q_ref12=qref, dt=env.cfg.dt)
-#--------------------------------------------------------------------------------------
 
-# After SRBD step, perform α alignment----------------------------------------------------------------
+            # Alpha alignment: pin the SRBD state's *value* to Isaac's ground
+            # truth while keeping the SRBD gradient corridor (scaled by alpha).
             alpha = env.cfg.alpha_align
             if env.cfg.use_strict_alpha_align:
                 env.srbd_p = env.base_pos + alpha * (env.srbd_p - env.srbd_p.detach())
@@ -231,11 +263,9 @@ def train(num_iters=1000, steps_per_iter=24,
             v_world_hist.append(v_hat3.clone())
             q_body_hist.append(env.srbd_q.clone())
             pz_hist.append(pz_hat.clone())
-            cmd_hist.append(env.cmd_rand.clone())      # ★ Record current [vx_cmd, vy_cmd, yaw_cmd]
+            cmd_hist.append(env.cmd_rand.clone())      # current [vx_cmd, vy_cmd, yaw_cmd]
             ureg_hist.append(a.clone())
 
-
-            #p_foot_srbd = env.srbd.foot_positions_srbd(qref)  # (B,4,3)
             p_foot_srbd = env.srbd.foot_positions_srbd(qref)  # (B,4,3)
             foot_err_vec = (p_foot_srbd - pref) * swing_mask
             foot_ref_hist.append(foot_err_vec.clone())
@@ -250,7 +280,7 @@ def train(num_iters=1000, steps_per_iter=24,
                 clear_viol = torch.relu(foot_tz + clear_margin - p_foot_srbd[..., 2])
                 clearance_hist.append(clear_viol * swing_mask.squeeze(-1))     # (B,4)
 
-            # Angular velocity (body frame) — env.srbd_w is already in body frame
+            # Angular velocity (env.srbd_w is already in the body frame)
             omega_hist.append(env.srbd_w.clone())
 
             # Gravity projection (body frame): g_body = R(q)^T @ g_world, batched
@@ -259,17 +289,6 @@ def train(num_iters=1000, steps_per_iter=24,
             g_w = torch.tensor([0.0, 0.0, -env.cfg.g], dtype=torch.float32, device=env.device)
             gproj_hist.append(torch.einsum('bji,j->bi', R_b, g_w))  # (B,3)
 
-            tilt_hist.append(0.7*torch.abs(env.pitch) + 0.3*torch.abs(env.roll))  # (B,)
-
-            # Reward (per-env, then average): v_body = R(q)^T @ v_world, batched
-            v_body_dbg = torch.einsum('bji,bj->bi', R_b, v_hat3)  # (B,3)
-
-            r_v = -(env.vx_star - v_body_dbg[:,0]).abs()      # (B,)
-            r_u = -0.01 * a.detach().pow(2).mean(dim=1)       # (B,)
-            r_stab = -0.8 * ((pz_hat - cfg.h0).abs() + tilt_hist[-1])
-
-
-
             done = extra["done"]              # (B,) falls
             # Episode timeout (Rudin dynamic curriculum); all-False on flat/rough so behaviour there
             # is unchanged (reset set == falls). Falls AND timeouts both reset, but only falls are
@@ -277,7 +296,7 @@ def train(num_iters=1000, steps_per_iter=24,
             timeout = extra.get("timeout", torch.zeros_like(done))
             reset_mask = done | timeout
 
-            # ★ Local reset for fallen / timed-out robots; also assign new vx_star + gait for these envs
+            # Local reset for fallen / timed-out robots (new command + gait for these envs).
             if reset_mask.any():
                 reset_ids = torch.nonzero(reset_mask, as_tuple=False).squeeze(-1)
                 if done.any():
@@ -316,34 +335,29 @@ def train(num_iters=1000, steps_per_iter=24,
             v_body_seq = torch.einsum('bji,bj->bi', R_flat, v_flat).reshape(T_steps, B, 3)
 
 
-            # ★ v_ref: use historical [vx_cmd, vy_cmd]
+            # v_ref: the historical per-step command [vx_cmd, vy_cmd]
             vref_body = torch.zeros_like(v_body_seq)
             if cmd_hist:
                 cmd_seq = torch.stack(cmd_hist)          # (T,B,3)
-                vref_body[..., 0:2] = cmd_seq[..., 0:2]  # Track vx, vy
+                vref_body[..., 0:2] = cmd_seq[..., 0:2]  # track vx, vy
             else:
-                # Fallback: only use current vx_star
+                # Fallback: only use the current vx_star
                 vref_body[..., 0] = env.vx_star.view(1,B).expand(T_steps,B)
 
-            # ★ Velocity tracking loss: vx & vy
-            #loss_v = ((v_body_seq - vref_body) ** 2).sum(dim=-1).mean()
+            # Velocity tracking loss on (vx, vy)
             loss_v = ((v_body_seq[..., :2] - vref_body[..., :2]) ** 2).sum(-1).mean()
 
-            # ==== New: average vx_body for each robot ====
-            # v_body_seq: (T,B,3) -> average over time first -> (B,3)
+            # Average body vx per robot (time-averaged), for logging/plots.
             vx_env = v_body_seq[..., 0].mean(dim=0)         # (B,)
-            vx_env_np = vx_env.detach().cpu().numpy()       # numpy for easy printing
+            vx_env_np = vx_env.detach().cpu().numpy()
 
-            # Original overall average vx (all envs + all timesteps)
             vx_for_plot = float(vx_env.mean().item())
-            # Optional: print vx for each env
             print(f"[Iter {it}] vx_body per env:", np.round(vx_env_np, 3))
         else:
             loss_v = torch.tensor(0.0, device=device); vx_for_plot = 0.0
 
-        # ★★★ Put check code here ★★★
+        # Periodic sanity check: body-frame velocity vs command direction (env 0).
         if it % 20 == 0:
-            # At this point v_body_seq is fully computed
             print(f"\n[DIRECTION CHECK] Iter {it}: Real_v_body_x={v_body_seq[0,0,0].item():+.3f}, Target_v_star={vref_body[0,0,0].item():+.3f}")
             print(f"                  World_v_x={v_world_seq[0,0,0].item():+.3f}")
 
@@ -357,10 +371,10 @@ def train(num_iters=1000, steps_per_iter=24,
         if omega_hist:
             omega_seq = torch.stack(omega_hist)  # (T,B,3)
 
-            # Roll/pitch regularization: want roll/pitch angular velocity not too large
+            # Roll/pitch regularization: keep roll/pitch angular velocity small.
             rollpitch_sq = (omega_seq[..., :2] ** 2).sum(dim=-1)   # (T,B)
 
-            # ★ Yaw angular velocity tracking: omega_z vs yaw_cmd
+            # Yaw-rate tracking: omega_z vs the commanded yaw rate.
             if cmd_hist:
                 cmd_seq = torch.stack(cmd_hist)          # (T,B,3)
                 yaw_cmd_seq = cmd_seq[..., 2]            # (T,B)
@@ -383,11 +397,10 @@ def train(num_iters=1000, steps_per_iter=24,
 
         if gproj_hist:
             gproj_seq = torch.stack(gproj_hist)  # (T,B,3)
-            #g_xy = gproj_seq[..., :2]
-            #loss_gproj = (g_xy ** 2).sum(dim=-1).mean()
             g_xy = gproj_seq[..., :2]
-            # Normalization: convert unit from m/s^2 to dimensionless, avoid this term being naturally an order of magnitude larger than others
-            g_xy_norm = g_xy / cfg.g   # cfg.g is typically 9.81
+            # Normalise from m/s^2 to dimensionless so this term is not
+            # naturally an order of magnitude larger than the others.
+            g_xy_norm = g_xy / cfg.g
             loss_gproj = (g_xy_norm ** 2).sum(dim=-1).mean()
         else:
             loss_gproj = torch.tensor(0.0, device=device)
@@ -433,17 +446,19 @@ def train(num_iters=1000, steps_per_iter=24,
             status = f"{norm:.8f}" if norm is not None else "MISSING (Zero/None)"
             print(f"  {name}: {status}")
 
-        # If first layer has no gradient, it means the connection from physics model (SRBD) to Policy is broken
-        if grad_dict['net.0.weight'] is not None and grad_dict['net.0.weight'] < 1e-9:
-            print("⚠️ Warning: Gradient almost 0! Physics model gradient failed to propagate back to neural network.")
+        # If the input-most layer has no gradient, the connection from the physics model
+        # (SRBD) back into the network is broken. Works for both Policy (net.0.weight)
+        # and VisionPolicy (encoder.conv.0.weight -- the depth CNN's first conv).
+        first_name = next(iter(grad_dict))
+        if grad_dict[first_name] is not None and grad_dict[first_name] < 1e-9:
+            print(f"[train] WARNING: gradient almost 0 at {first_name} -- physics-model gradient failed to propagate back into the network.")
         #------------------------------------------------
 
 
-        nn.utils.clip_grad_norm_(model.parameters(), 0.3)  # Stricter gradient clipping
+        nn.utils.clip_grad_norm_(model.parameters(), 0.3)
         opt.step()
 
-
-        # Detach SRBD state
+        # Detach the SRBD state at the iteration boundary (BPTT window ends here).
         env.srbd_p = env.srbd_p.detach()
         env.srbd_v = env.srbd_v.detach()
         env.srbd_q = env.srbd_q.detach()
@@ -464,7 +479,9 @@ def train(num_iters=1000, steps_per_iter=24,
 
     # ===== Save curves =====
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    def out(fn): return os.path.join(RESULTS_DIR, fn)
+    def out(fn):
+        stem, ext = os.path.splitext(fn)
+        return os.path.join(RESULTS_DIR, f"{stem}{run_tag}{ext}")
 
     V = np.array(vx_iter_track, dtype=np.float32)
     S = steps_per_iter
@@ -526,18 +543,34 @@ def train(num_iters=1000, steps_per_iter=24,
             a, _ = self.m(x)
             return a
 
-    wrapper = PolicyActOnly(model).to(device)
+    class VisionActOnly(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.m = m
+        def forward(self, x, d):
+            a, _ = self.m(x, d)
+            return a
 
-    example_obs = torch.zeros(1, env.obs_dim, device=device)  # 36 blind, 36+187 with height obs
+    if depth_policy:
+        wrapper = VisionActOnly(model).to(device)
+        example_obs = (
+            torch.zeros(1, env.obs_dim, device=device),
+            torch.zeros(1, 1, cfg.perception.out_h, cfg.perception.out_w, device=device),
+        )
+    else:
+        wrapper = PolicyActOnly(model).to(device)
+        example_obs = torch.zeros(1, env.obs_dim, device=device)  # 36 blind, 36+187 with height obs
     traced = torch.jit.trace(wrapper, example_obs)
     traced.save(out("quad_diffsim_srbd_align_multi_robot.pt"))
-    print(f"✅ Saved TorchScript: {out('quad_diffsim_srbd_align_multi_robot.pt')}")
-    # ===== Additional TorchScript export (for ROS2 deployment) =====
+    print(f"[train] Saved TorchScript: {out('quad_diffsim_srbd_align_multi_robot.pt')}")
 
-    print("✅ Training done (MULTI robot SRBD + α-align, Eq.(5) loss, body-frame vx tracking).")
+    print("[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).")
     
 if __name__ == "__main__":
-    # perception_terrain=True -> Rudin terrain + height-map obs + terrain losses
+    # PERCEPTION_TERRAIN=1|height -> Rudin terrain + privileged height-map obs (stage 1)
+    # PERCEPTION_TERRAIN=depth    -> Rudin terrain + depth-CNN vision policy (stage 2)
+    _mode = os.getenv("PERCEPTION_TERRAIN", "0").lower()
     train(num_iters=1000, steps_per_iter=24, seed=0,
-          perception_terrain=os.getenv("PERCEPTION_TERRAIN", "0") == "1")
+          perception_terrain=_mode in ("1", "height"),
+          depth_policy=_mode == "depth")
 
