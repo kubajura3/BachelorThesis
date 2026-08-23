@@ -38,6 +38,40 @@ except Exception:
     terrain_utils = None
 
 
+def terrain_family_by_column(num_cols, proportions):
+    """Column index -> terrain family name, mirroring :meth:`Terrain.make_terrain`.
+
+    ``make_terrain`` gates on ``choice = col / num_cols + 0.001`` against the
+    cumulative sums of ``terrain_proportions``. Two quirks are inherited verbatim
+    from legged_gym and matter when reading a per-type breakdown:
+
+    * the third branch covers *two* stair bands -- descending below cumulative
+      proportion[2], ascending above it -- so with the default proportions stairs
+      occupy 12 of 20 columns rather than the 35% the config comment suggests;
+    * the stepping-stone / gap / pit branches sit above cumulative proportion[4],
+      which the default proportions push to 1.0, so ``choice`` never reaches them.
+      With the shipped configuration **no stepping-stone terrain is generated.**
+
+    Default layout: cols 0-1 smooth slope, 2-3 rough slope, 4-10 stairs down,
+    11-15 stairs up, 16-19 discrete obstacles.
+    """
+    cum = [sum(proportions[:i + 1]) for i in range(len(proportions))]
+    names = []
+    for j in range(num_cols):
+        choice = j / num_cols + 0.001
+        if choice < cum[0]:
+            names.append("smooth slope")
+        elif choice < cum[1]:
+            names.append("rough slope")
+        elif choice < cum[3]:
+            names.append("stairs down" if choice < cum[2] else "stairs up")
+        elif choice < cum[4]:
+            names.append("discrete obstacles")
+        else:
+            names.append("unreachable")
+    return names
+
+
 @dataclass
 class TerrainData:
     """Everything needed to look up the shared terrain's surface height at a world (x, y).

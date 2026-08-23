@@ -7,12 +7,26 @@ alpha-alignment (value from Isaac, gradient corridor from SRBD). The loss is
 assembled from the SRBD states and backpropagated through the whole rollout
 into the policy (and, in depth mode, into the vision encoder).
 
-Run modes (also selectable via the PERCEPTION_TERRAIN environment variable):
-    blind (default)          -- flat terrain, 36-D observation
-    perception_terrain=True  -- Rudin terrain, 36+187-D obs + terrain losses
-    depth_policy=True        -- Rudin terrain, VisionPolicy (obs + depth CNN)
+Run modes, selected with the MODE environment variable:
+    blind (default) -- flat terrain, 36-D observation, no perception
+    blind_rudin     -- Rudin terrain, 36-D observation, no perception
+    hobs            -- Rudin terrain, 36+187-D obs (height scan), no terrain loss
+    hloss           -- Rudin terrain, 36-D obs, terrain-gradient losses
+    height          -- Rudin terrain, 36+187-D obs + terrain-gradient losses
+    depth           -- Rudin terrain, VisionPolicy (obs + depth CNN) + terrain losses
+
+`hobs` and `hloss` are the two ablation cells that separate the terrain
+*observation* path from the terrain *gradient* path.
+
+Other environment variables:
+    SEED       RNG seed (default 0)
+    NUM_ENVS   parallel robots, overrides EnvCfg.num_envs
+    ITERS      training iterations, overrides the default 1000
+    RUN_DIR    write every output of this run into this folder, and record
+               per-iteration timing / memory / metrics there (see bench_log.py)
 """
 
+import json
 import os
 
 # NOTE: Isaac Gym must be imported before torch (hard requirement of isaacgym).
@@ -31,9 +45,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from config import EnvCfg, ONLY_ITERATE_NO_RESET, PURE_PAPER_MODE
+from bench_log import BenchLog
+from config import (
+    CUDA_KERNEL_SRBD,
+    DEBUG_TRAIN,
+    FORCE_DTYPE,
+    EnvCfg,
+    ONLY_ITERATE_NO_RESET,
+    PURE_PAPER_MODE,
+)
 from env import RealQuadEnv
 from policy import Policy, VisionPolicy
+from terrain import terrain_family_by_column
 from utils_math import (
     moving_average,
     quat_to_rot,
@@ -43,13 +66,86 @@ from utils_math import (
 # Directory for all training outputs (curves, metrics, model weights).
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
+# Run modes: the EnvCfg fields each one sets, and the suffix its output files get.
+# Anything not listed keeps the EnvCfg default (perception and terrain losses off).
+MODE_CFG = {
+    "blind":       (dict(terrain_type="flat"),                                                                   ""),
+    "blind_rudin": (dict(terrain_type="rudin"),                                                                  "_blindr"),
+    "hobs":        (dict(terrain_type="rudin", use_perception=True, use_height_obs=True),                        "_hobs"),
+    "hloss":       (dict(terrain_type="rudin", use_perception=True, use_terrain_loss=True),                      "_hloss"),
+    "height":      (dict(terrain_type="rudin", use_perception=True, use_height_obs=True, use_terrain_loss=True), "_height"),
+    "depth":       (dict(terrain_type="rudin", use_perception=True, use_depth_obs=True, use_terrain_loss=True),  "_vision"),
+}
+
+
+def save_curriculum_snapshot(env, cfg, out):
+    """Write where every robot ended up on the curriculum grid.
+
+    The per-iteration ``terrain_level`` curve gives the mean over robots; this is
+    the distribution behind that mean at the end of training, which is what
+    distinguishes "everyone reached row 5" from "half at row 0, half at row 9".
+
+    Writes ``final_state.npz`` (per-robot arrays) and ``final_state.json``
+    (histogram over difficulty rows, per-terrain-family means, distance walked).
+    """
+    levels = env.terrain_levels.detach().cpu().numpy().astype(np.int64)
+    types = env.terrain_types.detach().cpu().numpy().astype(np.int64)
+    # Distance from the cell origin. NOTE: measured at whatever point each robot
+    # is in its episode when training stops, so it is a partial-episode distance,
+    # not a per-episode average -- useful as a spread, not as a headline metric.
+    dist = torch.norm(env.base_pos[:, 0:2] - env.env_origins[:, 0:2], dim=1)
+    dist = dist.detach().cpu().numpy()
+
+    num_rows = int(cfg.rudin_terrain.num_rows)
+    num_cols = int(cfg.rudin_terrain.num_cols)
+    families = terrain_family_by_column(num_cols, list(cfg.rudin_terrain.terrain_proportions))
+
+    hist = [int((levels == r).sum()) for r in range(num_rows)]
+    by_family = {}
+    for name in sorted(set(families)):
+        cols = [j for j, f in enumerate(families) if f == name]
+        mask = np.isin(types, cols)
+        if not mask.any():
+            continue
+        by_family[name] = {
+            "n_robots": int(mask.sum()),
+            "mean_terrain_level": float(levels[mask].mean()),
+            "max_terrain_level": int(levels[mask].max()),
+            "mean_distance_m": float(dist[mask].mean()),
+        }
+
+    np.savez(out("final_state.npz"), terrain_level=levels, terrain_type=types,
+             distance_from_origin=dist)
+    summary = {
+        "num_robots": int(levels.size),
+        "num_rows": num_rows,
+        "num_cols": num_cols,
+        "mean_terrain_level": float(levels.mean()),
+        "max_terrain_level": int(levels.max()),
+        "terrain_level_hist": hist,
+        "mean_distance_m": float(dist.mean()),
+        "column_to_family": families,
+        "by_terrain_family": by_family,
+    }
+    with open(out("final_state.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+
+    print(f"[train] final curriculum: mean level {summary['mean_terrain_level']:.2f} "
+          f"(max {summary['max_terrain_level']}), histogram over rows {hist}")
+    for name, stats in by_family.items():
+        print(f"[train]   {name:20s} n={stats['n_robots']:5d}  "
+              f"mean level {stats['mean_terrain_level']:.2f}")
+
 
 def train(num_iters=1000, steps_per_iter=24,
           device="cuda" if torch.cuda.is_available() else "cpu",
           seed: int = None, smooth_k: int = 25,
-          perception_terrain: bool = False,
-          depth_policy: bool = False):
-    """Train the policy and save weights, TorchScript export and curves to results/.
+          mode: str = "blind",
+          num_envs: int = None,
+          run_dir: str = None,
+          perception_terrain: bool = None,
+          depth_policy: bool = None):
+    """Train the policy and save weights, TorchScript export and curves.
 
     Args:
         num_iters: Outer training iterations (one optimiser step each).
@@ -58,40 +154,67 @@ def train(num_iters=1000, steps_per_iter=24,
         device: Torch device.
         seed: RNG seed (falls back to the SEED environment variable, then 0).
         smooth_k: Moving-average window for the smoothed curves.
-        perception_terrain: Stage-1 mode -- Rudin terrain, privileged height
-            scan in the observation, terrain-aware losses.
-        depth_policy: Stage-2 mode -- Rudin terrain, VisionPolicy consuming the
-            depth camera through a CNN, terrain-aware losses.
+        mode: One of ``MODE_CFG`` -- blind / blind_rudin / hobs / hloss /
+            height / depth. See the module docstring.
+        num_envs: Overrides ``EnvCfg.num_envs`` when given.
+        run_dir: When set, every output of this run goes into this folder and
+            per-iteration timing / memory / metrics are recorded there
+            (``iters.csv`` / ``meta.json`` / ``summary.json``). When ``None``
+            the previous behaviour is kept: outputs land in ``results/`` with a
+            mode suffix, and nothing is measured.
+        perception_terrain: Deprecated alias -- ``True`` selects ``height``.
+        depth_policy: Deprecated alias -- ``True`` selects ``depth``.
     """
+    # Deprecated boolean aliases, kept so older call sites and docs still work.
+    if depth_policy:
+        mode = "depth"
+    elif perception_terrain:
+        mode = "height"
+    if mode not in MODE_CFG:
+        raise SystemExit(f"unknown mode {mode!r}; expected one of {sorted(MODE_CFG)}")
+    mode_fields, run_tag = MODE_CFG[mode]
+    depth_policy = (mode == "depth")
+
     if seed is None: seed = int(os.getenv("SEED", 0))
     set_seed(seed)
 
     cfg = EnvCfg()
     cfg.trot_style = "normal"      # "normal" / "walk" / "run"
-    cfg.rand_cmd = False           # fixed command below (set True for per-env random commands)
-    cfg.vx_min = +0.5
-    cfg.vx_max = +0.5
     cfg.train_no_aerial = True
+    for field, value in mode_fields.items():
+        setattr(cfg, field, value)
+    if num_envs is not None:
+        cfg.num_envs = int(num_envs)
 
-    # Perception / hard-terrain training on the Rudin curriculum terrain with the
-    # terrain-aware differentiable losses (terrain-relative height + swing-foot
-    # clearance sampled at SRBD-predicted positions). Two policy-input variants:
-    #   perception_terrain -> 36+187-D obs (privileged height scan, stage 1)
-    #   depth_policy       -> 36-D obs + depth image through a CNN (stage 2)
-    if perception_terrain or depth_policy:
-        cfg.terrain_type = "rudin"
-        cfg.use_perception = True
-        cfg.use_terrain_loss = True
-        if depth_policy:
-            cfg.use_depth_obs = True
-        else:
-            cfg.use_height_obs = True
+    if cfg.terrain_type == "flat":
+        # Flat-ground command: a fixed forward 0.5 m/s. On the Rudin terrain these
+        # are ignored -- env._sample_command switches to the Rudin-matched
+        # omnidirectional ranges whenever terrain_type == "rudin".
+        cfg.rand_cmd = False
+        cfg.vx_min = +0.5
+        cfg.vx_max = +0.5
 
     if PURE_PAPER_MODE:
         cfg.use_paper_raibert = True
 
     env = RealQuadEnv(cfg, device=device)
     B = env.B
+
+    # Per-run measurement folder. Disabled (all no-ops) when run_dir is None.
+    bench = BenchLog(run_dir, meta={
+        "mode": mode, "seed": seed, "num_envs": B, "iters": num_iters,
+        "steps_per_iter": steps_per_iter,
+        "srbd_backend": "cuda" if CUDA_KERNEL_SRBD else "torch",
+        "force_dtype": FORCE_DTYPE,
+        "pure_paper_mode": PURE_PAPER_MODE,
+        "terrain_type": cfg.terrain_type,
+        "dt": cfg.dt,
+        # One iteration advances physics steps_per_iter times, so this converts an
+        # iteration index into simulated seconds per robot -- the x-axis that makes
+        # this comparable to legged_gym (24 * 4 * 0.005 = 0.48 s there).
+        "sim_seconds_per_iter": cfg.dt * steps_per_iter,
+        "device": str(device),
+    })
     if depth_policy:
         model = VisionPolicy(dim_obs=env.obs_dim, dim_action=12).to(device)
     else:
@@ -111,9 +234,8 @@ def train(num_iters=1000, steps_per_iter=24,
             return model(s, perc["depth_clean"], hx)
         return model(s, hx)
 
-    # Tag output files by run mode so blind / height / vision runs don't overwrite
-    # each other's curves and weights.
-    run_tag = "_vision" if depth_policy else ("_height" if perception_terrain else "")
+    # run_tag comes from MODE_CFG above: it keeps blind / height / vision runs from
+    # overwriting each other's curves and weights when they share one results dir.
     opt = AdamW(model.parameters(), lr=1e-3)
 
     # Loss weights: velocity, height, angular velocity, control effort,
@@ -133,9 +255,11 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_gproj_hist_iter = []
     loss_foot_hist_iter = []
     loss_clear_hist_iter = []
+    terrain_level_iter = []
 
     # Outer loop
     for it in pbar:
+        bench.start()
         # α alignment scheduling
         if PURE_PAPER_MODE:
             env.cfg.alpha_align = 0.9
@@ -167,6 +291,8 @@ def train(num_iters=1000, steps_per_iter=24,
 
         hx = None
         hx_hold = None
+        n_falls_iter = 0
+        n_timeouts_iter = 0
 
         a_prev = torch.zeros(B, 12, device=device)
 
@@ -197,7 +323,7 @@ def train(num_iters=1000, steps_per_iter=24,
                     hx = hx_hold
 
             # ------------------- Isaac Gym simulation, one control step -------------------
-            obs, extra, q_err, qref = env.step(a)
+            _, extra, q_err, qref = env.step(a)
 
             # ------------------- gait plan for this step -------------------
             p_foot = env.foot_positions()                     # (B,4,3)
@@ -299,6 +425,10 @@ def train(num_iters=1000, steps_per_iter=24,
             # Local reset for fallen / timed-out robots (new command + gait for these envs).
             if reset_mask.any():
                 reset_ids = torch.nonzero(reset_mask, as_tuple=False).squeeze(-1)
+                # Accumulated as tensors and read once per iteration, so this adds
+                # no GPU->CPU sync inside the per-step loop.
+                n_falls_iter = n_falls_iter + done.sum()
+                n_timeouts_iter = n_timeouts_iter + timeout.sum()
                 if done.any():
                     episodic_reward -= cfg.term_penalty * float(done.float().mean().item())
                 env.reset_envs(reset_ids)
@@ -349,15 +479,17 @@ def train(num_iters=1000, steps_per_iter=24,
 
             # Average body vx per robot (time-averaged), for logging/plots.
             vx_env = v_body_seq[..., 0].mean(dim=0)         # (B,)
-            vx_env_np = vx_env.detach().cpu().numpy()
-
             vx_for_plot = float(vx_env.mean().item())
-            print(f"[Iter {it}] vx_body per env:", np.round(vx_env_np, 3))
+            if DEBUG_TRAIN:
+                # .cpu() syncs and copies num_envs floats to the host every iteration;
+                # at B=1024 that is 1024 formatted numbers printed per iteration.
+                vx_env_np = vx_env.detach().cpu().numpy()
+                print(f"[Iter {it}] vx_body per env:", np.round(vx_env_np, 3))
         else:
             loss_v = torch.tensor(0.0, device=device); vx_for_plot = 0.0
 
         # Periodic sanity check: body-frame velocity vs command direction (env 0).
-        if it % 20 == 0:
+        if DEBUG_TRAIN and it % 20 == 0:
             print(f"\n[DIRECTION CHECK] Iter {it}: Real_v_body_x={v_body_seq[0,0,0].item():+.3f}, Target_v_star={vref_body[0,0,0].item():+.3f}")
             print(f"                  World_v_x={v_world_seq[0,0,0].item():+.3f}")
 
@@ -432,30 +564,35 @@ def train(num_iters=1000, steps_per_iter=24,
         loss.backward()
 
         #------------------------------------------------
-        # --- Gradient flow analysis patch ---
-        grad_dict = {}
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                grad_norm = param.grad.norm().item()
-                grad_dict[name] = grad_norm
-            else:
-                grad_dict[name] = None
-        # Print gradient strength for key layers
-        print(f"\n[Debug Iter {it}] Gradient Norms:")
-        for name, norm in grad_dict.items():
-            status = f"{norm:.8f}" if norm is not None else "MISSING (Zero/None)"
-            print(f"  {name}: {status}")
+        # --- Gradient flow analysis patch (DEBUG_TRAIN only) ---
+        # One GPU->CPU sync per parameter, so it stays out of campaign runs. Must run
+        # BEFORE clip_grad_norm_, which rescales the gradients in place: these are the
+        # pre-clip per-parameter norms.
+        if DEBUG_TRAIN:
+            grad_dict = {}
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    grad_dict[name] = param.grad.norm().item()
+                else:
+                    grad_dict[name] = None
+            # Print gradient strength for key layers
+            print(f"\n[Debug Iter {it}] Gradient Norms:")
+            for name, norm in grad_dict.items():
+                status = f"{norm:.8f}" if norm is not None else "MISSING (Zero/None)"
+                print(f"  {name}: {status}")
 
-        # If the input-most layer has no gradient, the connection from the physics model
-        # (SRBD) back into the network is broken. Works for both Policy (net.0.weight)
-        # and VisionPolicy (encoder.conv.0.weight -- the depth CNN's first conv).
-        first_name = next(iter(grad_dict))
-        if grad_dict[first_name] is not None and grad_dict[first_name] < 1e-9:
-            print(f"[train] WARNING: gradient almost 0 at {first_name} -- physics-model gradient failed to propagate back into the network.")
+            # If the input-most layer has no gradient, the connection from the physics model
+            # (SRBD) back into the network is broken. Works for both Policy (net.0.weight)
+            # and VisionPolicy (encoder.conv.0.weight -- the depth CNN's first conv).
+            first_name = next(iter(grad_dict))
+            if grad_dict[first_name] is not None and grad_dict[first_name] < 1e-9:
+                print(f"[train] WARNING: gradient almost 0 at {first_name} -- physics-model gradient failed to propagate back into the network.")
         #------------------------------------------------
 
-
-        nn.utils.clip_grad_norm_(model.parameters(), 0.3)
+        # clip_grad_norm_ computes the total pre-clip gradient norm anyway and returns
+        # it, so the always-on gradient-health diagnostic costs one sync per iteration
+        # instead of one per parameter. Shown in the progress bar as |g|.
+        grad_norm = float(nn.utils.clip_grad_norm_(model.parameters(), 0.3))
         opt.step()
 
         # Detach the SRBD state at the iteration boundary (BPTT window ends here).
@@ -472,16 +609,35 @@ def train(num_iters=1000, steps_per_iter=24,
         loss_foot_hist_iter.append(float(loss_foot.detach().cpu()))
         loss_clear_hist_iter.append(float(loss_clearance.detach().cpu()))
 
+        # Mean curriculum difficulty row across robots. This is the same quantity
+        # legged_gym logs as extras["episode"]["terrain_level"], so it is the metric
+        # the PPO comparison is made on. NaN on flat terrain, where it does not exist.
+        levels = getattr(env, "terrain_levels", None)
+        terrain_level = float(levels.float().mean().item()) if levels is not None else float("nan")
+        terrain_level_iter.append(terrain_level)
+
+        bench.stop(loss=loss.item(), vx=vx_for_plot, grad_norm=grad_norm,
+                   terrain_level=terrain_level,
+                   loss_v=loss_v_hist_iter[-1], loss_clear=loss_clear_hist_iter[-1],
+                   n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter))
+
         vx_iter_track.append(vx_for_plot)
         losses.append(loss.item()); rewards.append(episodic_reward)
-        pbar.set_description(f"Iter {it:4d} | loss {loss.item():.3f} | v_body_x {vx_for_plot:+.2f}")
+        pbar.set_description(f"Iter {it:4d} | loss {loss.item():.3f} | v_body_x {vx_for_plot:+.2f} | |g| {grad_norm:.3f}")
 
 
     # ===== Save curves =====
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    # With RUN_DIR set every run has its own folder, so the mode suffix is dropped;
+    # without it, outputs share results/ and the suffix keeps them apart.
+    out_dir = run_dir or RESULTS_DIR
+    out_suffix = "" if run_dir else run_tag
+    os.makedirs(out_dir, exist_ok=True)
     def out(fn):
         stem, ext = os.path.splitext(fn)
-        return os.path.join(RESULTS_DIR, f"{stem}{run_tag}{ext}")
+        return os.path.join(out_dir, f"{stem}{out_suffix}{ext}")
+
+    np.save(out("terrain_level_srbd_align.npy"),
+            np.array(terrain_level_iter, dtype=np.float32))
 
     V = np.array(vx_iter_track, dtype=np.float32)
     S = steps_per_iter
@@ -564,13 +720,47 @@ def train(num_iters=1000, steps_per_iter=24,
     traced.save(out("quad_diffsim_srbd_align_multi_robot.pt"))
     print(f"[train] Saved TorchScript: {out('quad_diffsim_srbd_align_multi_robot.pt')}")
 
+    # Where every robot ended up on the curriculum -- the distribution behind the
+    # mean terrain_level curve. Rudin terrain only; flat ground has no curriculum.
+    if getattr(env, "terrain_levels", None) is not None:
+        save_curriculum_snapshot(env, cfg, out)
+
+    bench.close()
     print("[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).")
     
+def _env_int(name, default=None, minimum=1):
+    """Int from the environment, at least `minimum`; ignored with a warning if not.
+
+    `minimum` is 1 for counts (NUM_ENVS, ITERS) and 0 for SEED, where 0 is a
+    perfectly good seed and also the default.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        if value < minimum:
+            raise ValueError
+        return value
+    except ValueError:
+        print(f"[train] ignoring {name}={raw!r} (expected an integer >= {minimum})")
+        return default
+
+
+def _env_mode():
+    """Run mode from MODE, falling back to the older PERCEPTION_TERRAIN spelling."""
+    raw = os.getenv("MODE")
+    if raw:
+        return raw.strip().lower()
+    legacy = os.getenv("PERCEPTION_TERRAIN", "0").strip().lower()
+    return {"1": "height", "height": "height", "depth": "depth"}.get(legacy, "blind")
+
+
 if __name__ == "__main__":
-    # PERCEPTION_TERRAIN=1|height -> Rudin terrain + privileged height-map obs (stage 1)
-    # PERCEPTION_TERRAIN=depth    -> Rudin terrain + depth-CNN vision policy (stage 2)
-    _mode = os.getenv("PERCEPTION_TERRAIN", "0").lower()
-    train(num_iters=1000, steps_per_iter=24, seed=0,
-          perception_terrain=_mode in ("1", "height"),
-          depth_policy=_mode == "depth")
+    train(num_iters=_env_int("ITERS", 1000),
+          steps_per_iter=24,
+          seed=_env_int("SEED", 0, minimum=0),
+          mode=_env_mode(),
+          num_envs=_env_int("NUM_ENVS"),
+          run_dir=os.getenv("RUN_DIR"))
 

@@ -29,9 +29,11 @@ import torch
 
 from config import (
     DBG_INIT_FALL,
+    FORCE_DTYPE,
     DBG_INIT_FALL_ENV,
     DBG_INIT_FALL_EVERY,
     DBG_INIT_FALL_STEPS,
+    DEBUG_TRAIN,
     PURE_PAPER_MODE,
     EnvCfg,
 )
@@ -1181,7 +1183,7 @@ class RealQuadEnv:
 
         Computes the joint torques the PD controller implies, maps them to foot
         forces with a damped pseudo-inverse of the stance-weighted Jacobian
-        (solved in float64 for numerical stability), then applies Fz clamping
+        (solved in float32 by default; see config.FORCE_DTYPE), then applies Fz clamping
         and a friction-cone limit. Differentiable in ``q_ref12`` -- this is the
         input path through which policy gradients reach the SRBD step.
 
@@ -1210,12 +1212,16 @@ class RealQuadEnv:
         Jw   = J12 * stance_mask.view(B, 4, 1, 1)       # (B,4,3,12)
         Jbig = Jw.reshape(B, 12, 12)                    # (B,12,12)
 
-        # ---- Damped-pseudo-inverse solve in float64 for precision ----
-        # (.double()/.float() are differentiable, so the policy -> q_ref12 -> tau
-        #  -> f autograd path is preserved; float64 removes batched-vs-loop drift.)
-        JJt = (Jbig @ Jbig.transpose(-1, -2)).double()  # (B,12,12)
-        rhs = (Jbig @ tau).double()                     # (B,12,1)
-        eye = torch.eye(12, device=dev, dtype=torch.float64)            # broadcasts over batch
+        # ---- Damped-pseudo-inverse solve (precision from config.FORCE_DTYPE) ----
+        # (the dtype casts are differentiable, so the policy -> q_ref12 -> tau -> f
+        #  autograd path is preserved either way. float32 is the default and matches
+        #  the inherited implementation; float64 is available for verification and is
+        #  what tests/test_vectorization.py uses as its reference. The singular-value
+        #  clamp below bounds the conditioning, which is why fp32 is enough here.)
+        solve_dtype = torch.float64 if FORCE_DTYPE == "fp64" else torch.float32
+        JJt = (Jbig @ Jbig.transpose(-1, -2)).to(solve_dtype)  # (B,12,12)
+        rhs = (Jbig @ tau).to(solve_dtype)                     # (B,12,1)
+        eye = torch.eye(12, device=dev, dtype=solve_dtype)      # broadcasts over batch
         U, S, Vh = torch.linalg.svd(JJt + 1e-9 * eye)   # (B,12,12)/(B,12)/(B,12,12)
         S = torch.clamp(S, min=1e-3)
         Ainv = U @ torch.diag_embed(1.0 / S) @ Vh       # (B,12,12)
@@ -1245,9 +1251,16 @@ class RealQuadEnv:
                 tanh/scaling).
 
         Returns:
-            (obs, extra, q_err, q_ref12) where ``extra`` carries the ``done``
-            (fall) and ``timeout`` (Rudin episode limit) masks, and ``q_ref12``
-            is the gradient-carrying joint reference consumed by the SRBD step.
+            (None, extra, q_err, q_ref12). The first slot is a vestigial
+            Gym-style observation and is always ``None``: every caller re-reads
+            ``get_obs()`` itself at the top of its own loop, and that read is
+            also the correct one because it happens *after* any ``reset_envs``,
+            whereas an observation assembled here would be pre-reset and stale.
+            Assembling one was therefore pure waste -- in ``use_height_obs``
+            mode it included a discarded 187-point heightfield sample per robot
+            per step. ``extra`` carries the ``done`` (fall) and ``timeout``
+            (Rudin episode limit) masks, and ``q_ref12`` is the
+            gradient-carrying joint reference consumed by the SRBD step.
         """
         cfg = self.cfg
 
@@ -1351,8 +1364,14 @@ class RealQuadEnv:
             )
 
             # ===== stride debug print (env0, per-leg touchdown-to-touchdown) =====
+            # DEBUG_TRAIN short-circuits before touchdown[b0].any(), which puts a GPU
+            # tensor in an `if` and so forces a GPU->CPU sync on EVERY physics step
+            # (24 per training iteration). _stride_print_limit below caps the printing
+            # but never the syncing, so this flag is what actually removes the cost.
+            # The last_contact_xy / last_contact_z updates around this block are real
+            # state read by the gait planner and are deliberately NOT gated.
             b0 = 0
-            if touchdown[b0].any():
+            if DEBUG_TRAIN and touchdown[b0].any():
                 # Basic quantities: actual velocity, step frequency
                 # Note: your cmd_rand here is in body frame
                 v_body_x = float(self.base_lin_body[b0, 0].item())
@@ -1503,7 +1522,6 @@ class RealQuadEnv:
         else:
             timed_out = torch.zeros(self.B, dtype=torch.bool, device=self.device)
 
-        obs = self.get_obs()
         extra = {
             "done": done,
             "timeout": timed_out,
@@ -1514,7 +1532,7 @@ class RealQuadEnv:
         q_now_pol = q_now_sim * ctrl_sign12                         # sim -> policy convention
         q_err = q_ref12 - q_now_pol                                 # both sides in policy convention
 
-        return obs, extra, q_err, q_ref12
+        return None, extra, q_err, q_ref12
 
     @torch.no_grad()
     def get_obs(self):

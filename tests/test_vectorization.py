@@ -6,7 +6,8 @@ cover the same treatment applied to the remaining per-env Python for-loops. They
 verify the new batched implementations are numerically equivalent to the
 original per-env loops they replace:
 
-  1. estimate_foot_forces  (env.py)  -- batched (B,12,12) SVD vs per-env loop
+  1. estimate_foot_forces  (env.py)  -- batched (B,12,12) SVD vs per-env loop,
+     plus a bound on the error of the shipped float32 solve
   2. _mix_stance           (gait.py) -- batched top-k vs per-env loop
   3. autograd flow through the batched estimate_foot_forces is preserved
 
@@ -66,16 +67,20 @@ def _foot_forces_loop(J12, tau_in, stance_mask, cfg, dtype):
     return torch.stack(f_list, dim=0)
 
 
-def _foot_forces_batched(J12, tau_in, stance_mask, cfg):
-    """Mirror of env.py:estimate_foot_forces (batched, float64 solve core)."""
+def _foot_forces_batched(J12, tau_in, stance_mask, cfg, dtype=torch.float32):
+    """Mirror of env.py:estimate_foot_forces (batched; solve core in `dtype`).
+
+    `dtype` mirrors config.FORCE_DTYPE: float32 is what ships, float64 is the
+    reference the checks below measure against.
+    """
     B = J12.shape[0]
     dev = J12.device
     tau = tau_in.view(B, 12, 1)
     Jw = J12 * stance_mask.view(B, 4, 1, 1)
     Jbig = Jw.reshape(B, 12, 12)
-    JJt = (Jbig @ Jbig.transpose(-1, -2)).double()
-    rhs = (Jbig @ tau).double()
-    eye = torch.eye(12, device=dev, dtype=torch.float64)
+    JJt = (Jbig @ Jbig.transpose(-1, -2)).to(dtype)
+    rhs = (Jbig @ tau).to(dtype)
+    eye = torch.eye(12, device=dev, dtype=dtype)
     U, S, Vh = torch.linalg.svd(JJt + 1e-9 * eye)
     S = torch.clamp(S, min=1e-3)
     Ainv = U @ torch.diag_embed(1.0 / S) @ Vh
@@ -90,26 +95,55 @@ def _foot_forces_batched(J12, tau_in, stance_mask, cfg):
     return torch.cat([ft, fz], dim=-1)
 
 
+# Physically meaningful bound on the float32 solve. Foot forces are order 10-100 N
+# and are clamped to [20, 250] N and friction-cone projected downstream, so an error
+# of 1 mN is four orders of magnitude below anything that could change behaviour.
+FP32_TOL_N = 1e-3
+
+
 def test_estimate_foot_forces():
+    """Two separate claims, deliberately kept apart.
+
+    1. *Vectorisation is correct*: the batched rewrite reproduces the per-env loop
+       it replaced. Measured in float64 on both sides, so the check isolates the
+       vectorisation from any question of precision. This is the evidence for the
+       vectorisation contribution and its tolerance does not move.
+    2. *The shipped float32 solve is accurate enough*: the default float32 path
+       differs from the float64 reference by far less than the forces themselves
+       are resolved to.
+    """
     B = 16
     cfg = _Cfg()
     J12 = torch.randn(B, 4, 3, 12, dtype=torch.float32)
     tau = torch.randn(B, 12, dtype=torch.float32)
-    stance = (torch.rand(B, 4, 1) > 0.5).float()  # random subset of feet in stance
+    # A random subset of feet in stance zeroes whole rows of J, so JJt is
+    # rank-deficient -- the ill-conditioned case, which is the one that matters.
+    stance = (torch.rand(B, 4, 1) > 0.5).float()
 
-    f_batched = _foot_forces_batched(J12, tau, stance, cfg)
+    f_b64 = _foot_forces_batched(J12, tau, stance, cfg, torch.float64)
+    f_b32 = _foot_forces_batched(J12, tau, stance, cfg, torch.float32)
     f_loop64 = _foot_forces_loop(J12, tau, stance, cfg, torch.float64).float()
     f_loop32 = _foot_forces_loop(J12, tau, stance, cfg, torch.float32)
 
-    d64 = (f_batched - f_loop64).abs().max().item()
-    d32 = (f_batched - f_loop32).abs().max().item()
-    print(f"[estimate_foot_forces] max|batched - loop(f64)| = {d64:.3e}")
-    print(f"[estimate_foot_forces] max|batched - loop(f32)| = {d32:.3e}  (float32-loop rounding)")
-    # Vectorization correctness: the batched float64 core must match the float64
-    # per-env loop to solver tolerance (the SVD pseudo-inverse is sign-invariant).
-    assert torch.allclose(f_batched, f_loop64, atol=1e-6, rtol=1e-5), \
+    # ---- 1) vectorisation parity, both sides in float64 ----
+    d64 = (f_b64 - f_loop64).abs().max().item()
+    print(f"[estimate_foot_forces] max|batched(f64) - loop(f64)| = {d64:.3e}")
+    assert torch.allclose(f_b64, f_loop64, atol=1e-6, rtol=1e-5), \
         f"batched vs per-env loop (f64) mismatch: max|d|={d64:.3e}"
-    print("[estimate_foot_forces] PASS (batched == per-env loop)\n")
+    print("[estimate_foot_forces] PASS (batched == per-env loop)")
+
+    # ---- 2) the shipped float32 solve, against the float64 reference ----
+    d32_ref = (f_b32 - f_b64).abs().max().item()
+    d32_loop = (f_b32 - f_loop32).abs().max().item()
+    print(f"[estimate_foot_forces] max|batched(f32) - batched(f64)| = {d32_ref:.3e} N"
+          f"   (shipped precision, tol {FP32_TOL_N:.0e} N)")
+    print(f"[estimate_foot_forces] max|batched(f32) - loop(f32)|    = {d32_loop:.3e} N")
+    assert d32_ref < FP32_TOL_N, \
+        (f"float32 solve drifts {d32_ref:.3e} N from the float64 reference, above the "
+         f"{FP32_TOL_N:.0e} N bound -- re-check config.FORCE_DTYPE before training")
+    assert d32_loop < FP32_TOL_N, \
+        f"batched(f32) vs loop(f32) mismatch: max|d|={d32_loop:.3e} N"
+    print("[estimate_foot_forces] PASS (float32 solve within tolerance)\n")
 
 
 def test_grad_flow():

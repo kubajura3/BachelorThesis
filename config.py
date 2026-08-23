@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 
 # PerceptionCfg is lightweight (stdlib dataclass only); importing it here does
@@ -10,6 +11,30 @@ from perception.config import PerceptionCfg
 PURE_PAPER_MODE = True
 # True  = Pure paper version (no engineering tricks)
 # False = Engineering version (with initial velocity, action smoothing, etc.)
+
+def _flag(name, default):
+    """Read a boolean switch from the environment, falling back to `default`.
+
+    Env vars are strings, and bool("0") is True, so the value is parsed
+    explicitly. Unset -> `default`, i.e. exactly the literal written below, so a
+    plain `python train.py` behaves identically to before these overrides existed.
+    Set before the process starts (e.g. `DEBUG_TRAIN=1 python train.py`), because
+    config.py is imported at module scope, long before any argument parsing.
+    """
+    v = os.getenv(name)
+    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ===============================
+# Verbose Training Diagnostics Switch  (env var: DEBUG_TRAIN=1)
+# ===============================
+DEBUG_TRAIN = _flag("DEBUG_TRAIN", False)
+# Gates the per-iteration / per-step diagnostic output that forces GPU->CPU
+# synchronisation inside the hot loop: the per-parameter gradient dump and the
+# per-env velocity print in train.py, and the per-leg stride print in env.step().
+# Off by default -- those syncs are fixed overhead per iteration, so they inflate
+# the small-batch end of any throughput measurement. Turn on for debugging a
+# single short run; keep off for training campaigns and benchmarks.
 
 # ===============================
 # Initial Fall Debug Print Switch (only print first N steps of env0)
@@ -30,9 +55,38 @@ ONLY_ITERATE_NO_RESET = True
 # ===============================
 # SRBD CUDA Kernel Switch
 # ===============================
-CUDA_KERNEL_SRBD = True
+CUDA_KERNEL_SRBD = _flag("CUDA_KERNEL_SRBD", True)
 # True  = Use custom CUDA kernel for _srbd_step (requires: python setup.py build_ext --inplace)
 # False = Use PyTorch implementation (default, always works)
+# Env var CUDA_KERNEL_SRBD=0/1 overrides the literal above, so the PyTorch-vs-CUDA
+# speed comparison needs no source edit between runs. srbd.py reads this at import
+# time, which is why it has to be an environment variable and not a CLI flag.
+
+# ===============================
+# Ground-Reaction-Force Solver Precision  (env var: FORCE_DTYPE=fp32|fp64)
+# ===============================
+FORCE_DTYPE = os.getenv("FORCE_DTYPE", "fp32").strip().lower()
+# Precision of the damped-pseudo-inverse solve in env.estimate_foot_forces, which
+# runs once per physics step (24 per training iteration) regardless of the SRBD
+# backend -- the fused CUDA kernel is pure fp32 and does not touch it.
+#
+# fp32 (default) is what the inherited implementation (commit 1731453) used, and it
+# is what ships now. fp64 was adopted for a while together with the batched rewrite
+# (commit 7a82eca) so that batched and per-env-loop results agreed tightly enough
+# for a strict parity assertion -- a *testing* decision, not a physics one -- and it
+# is expensive: consumer GPUs run fp64 at 1/32 of fp32 (e.g. GTX 1660 Ti), and this
+# solve happens 24 times per training iteration.
+#
+# The accuracy cost is negligible. clamp(S, min=1e-3) on the singular values caps
+# the effective condition number of the applied inverse, so the fp32-vs-fp64
+# difference measures ~1e-5 N (tests/test_vectorization.py prints it) against foot
+# forces of order 10-100 N that are then clamped to [20, 250] N and friction-cone
+# projected.
+#
+# fp64 remains available for verification: tests/test_vectorization.py uses it as
+# the reference both for the vectorisation parity check and for bounding the fp32
+# error. Never change this midway through a training campaign -- it changes the
+# numbers the policy trains on.
 
 
 @dataclass

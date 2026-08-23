@@ -14,8 +14,10 @@ BachelorThesis/
 ├── srbd.py                      # Differentiable rigid body dynamics (SRBDModel)
 ├── env.py                       # Isaac Gym simulation environment (RealQuadEnv)
 ├── train.py                     # Training main loop (blind / height / depth modes)
-├── play_many_dog.py             # Policy playback script
+├── play_many_dog.py             # Policy playback script (--terrain / --obs-mode)
 ├── evaluate_rudin_comparison.py # Deterministic eval vs Rudin's PPO baseline
+├── bench_log.py                 # Per-run folder writer (iters.csv/meta.json/summary.json)
+├── collect_bench.py             # Merges run folders into runs.csv + figures (no torch)
 ├── setup.py                     # Build script for the SRBD CUDA extension
 ├── go2_description.urdf         # Unitree Go2 robot model
 ├── perception/                  # Terrain perception (depth camera + height sampler)
@@ -101,19 +103,122 @@ pip install -e .
 # Blind baseline: flat ground, 36-D observation (1000 iterations, 24 steps each)
 python3 train.py
 
-# Stage 1: Rudin curriculum terrain + privileged height-scan observation (36+187-D)
-#          + terrain-aware differentiable losses. Outputs get the "_height" tag.
-PERCEPTION_TERRAIN=1 python3 train.py
+# Rudin curriculum terrain + privileged height-scan observation (36+187-D)
+# + terrain-aware differentiable losses. Outputs get the "_height" tag.
+MODE=height python3 train.py
 
-# Stage 2: Rudin terrain + VisionPolicy (36-D obs + depth image through a CNN,
-#          trained end-to-end through the SRBD rollout). Outputs get "_vision".
-PERCEPTION_TERRAIN=depth python3 train.py
+# Rudin terrain + VisionPolicy (36-D obs + depth image through a CNN, trained
+# end-to-end through the SRBD rollout). Outputs get "_vision".
+MODE=depth python3 train.py
 
-# Files generated in results/ (tag = "", "_height" or "_vision" by mode):
+# Files generated in results/ (tag = "" / "_blindr" / "_hobs" / "_hloss" /
+# "_height" / "_vision" by mode):
 # - results/quad_diffsim_srbd_align_multi_robot<tag>.pth  (model weights)
 # - results/quad_diffsim_srbd_align_multi_robot<tag>.pt   (TorchScript export)
 # - results/ training curves (loss_*<tag>.png, vx_curve_*<tag>.png, ...)
 ```
+
+#### Run modes (`MODE`)
+
+Six configurations of the same training loop. `hobs` and `hloss` are the ablation
+cells that separate the terrain *observation* path from the terrain *gradient*
+path -- the same terrain signal, reaching the policy two different ways.
+
+| `MODE` | terrain | height scan in obs | terrain in loss | depth camera | policy |
+|--------|---------|--------------------|-----------------|--------------|--------|
+| `blind` (default) | flat | -- | -- | -- | `Policy(36)` |
+| `blind_rudin` | rudin | -- | -- | -- | `Policy(36)` |
+| `hobs` | rudin | yes | no | no | `Policy(223)` |
+| `hloss` | rudin | no | yes | no | `Policy(36)` |
+| `height` | rudin | yes | yes | no | `Policy(223)` |
+| `depth` | rudin | no | yes | yes | `VisionPolicy(36)` |
+
+`PERCEPTION_TERRAIN=1|height|depth` still works as an alias for `MODE`.
+
+Note that on the Rudin terrain the velocity command switches to Rudin's
+omnidirectional ranges (lin_vel_x/y in [-1, 1] m/s, ang_vel_yaw in [-1, 1] rad/s)
+regardless of `cfg.rand_cmd`, while flat ground uses a fixed forward 0.5 m/s. A
+policy trained on flat ground has therefore never seen a lateral or yaw command --
+which is why `blind_rudin` exists as the control condition for terrain experiments.
+
+#### Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `MODE` | `blind` | Run mode, see the table above |
+| `SEED` | `0` | RNG seed |
+| `NUM_ENVS` | `EnvCfg.num_envs` (16) | Parallel robots |
+| `ITERS` | `1000` | Training iterations |
+| `RUN_DIR` | unset | Put every output of this run in one folder, and measure it |
+| `DEBUG_TRAIN` | `0` | Verbose diagnostics, see [Debugging Features](#debugging-features) |
+| `CUDA_KERNEL_SRBD` | `1` | Fused CUDA SRBD kernel on/off, without editing `config.py` |
+| `FORCE_DTYPE` | `fp32` | Precision of the ground-reaction-force solve (`fp32`/`fp64`) |
+
+They are environment variables rather than CLI flags because `config.py` is
+imported at module scope -- `srbd.py` reads `CUDA_KERNEL_SRBD` at import time, long
+before any argument parsing could run.
+
+#### Per-run folders (`RUN_DIR`)
+
+With `RUN_DIR` set, the mode suffix is dropped (the folder already separates runs)
+and `bench_log.py` additionally writes:
+
+```
+results/train/height_s0/
+  iters.csv     iter, t_iter_s, peak_mem_mb, loss, vx, grad_norm,
+                terrain_level, loss_v, loss_clear, n_falls, n_timeouts
+  meta.json     mode, seed, num_envs, srbd_backend, force_dtype, terrain_type,
+                sim_seconds_per_iter, git_commit, gpu, torch/cuda versions
+  summary.json  it_per_s median/p10/p90, peak_mem_mb, total_wall_s, final_* values
+```
+
+`t_iter_s` brackets each iteration with `torch.cuda.synchronize()`, so it measures
+GPU work rather than kernel-launch time. The first 20 iterations are excluded from
+the summary statistics (CUDA context, cuBLAS autotuning, terrain build, allocator
+growth). `terrain_level` is the mean curriculum row across robots -- the same
+quantity legged_gym logs as `extras["episode"]["terrain_level"]`, so it is directly
+comparable; it is NaN on flat terrain, which has no curriculum.
+
+```bash
+MODE=height SEED=0 NUM_ENVS=1024 ITERS=5000 RUN_DIR=results/train/height_s0 python3 train.py
+CUDA_KERNEL_SRBD=0 MODE=blind NUM_ENVS=1024 ITERS=100 RUN_DIR=results/bench/torch_B1024 python3 train.py
+```
+
+`bench_log.py` imports nothing from this repository (only torch + the standard
+library), so it can be copied into an older checkout to measure it the same way.
+
+#### End-of-training curriculum snapshot
+
+Every run on the Rudin terrain also writes, next to the curves:
+
+```
+final_state.npz    per robot: terrain_level, terrain_type (grid column),
+                   distance_from_origin
+final_state.json   histogram over the difficulty rows, mean/max level,
+                   per-terrain-family means, the column-to-family mapping
+```
+
+The per-iteration `terrain_level` curve gives the mean across robots; this is the
+distribution behind it, which is what separates "every robot reached row 5" from
+"half at row 0, half at row 9". `terrain.terrain_family_by_column` supplies the
+mapping and mirrors the terrain generator exactly -- with the default
+`terrain_proportions` that is columns 0-1 smooth slope, 2-3 rough slope, 4-10
+stairs down, 11-15 stairs up, 16-19 discrete obstacles. Note that stairs therefore
+occupy 12 of the 20 columns, and that **no stepping-stone terrain is generated**:
+that branch sits above a cumulative proportion the defaults push to 1.0. Both are
+inherited from legged_gym verbatim.
+
+#### Aggregating runs
+
+```bash
+python3 collect_bench.py --results-dir results --out results/figures
+```
+
+Walks every folder containing a `summary.json` and writes `runs.csv` (one row per
+run) plus `fig_speed_itps.png`, `fig_speed_mem.png` and `fig_terrain_level.png`
+(all conditions on one axes, mean over seeds with a min/max band, x-axis in
+simulated seconds per robot). Needs numpy + matplotlib only -- no torch, no Isaac
+Gym -- so it runs on a laptop.
 
 ### Evaluation (comparison against Rudin's PPO baseline)
 
@@ -137,6 +242,32 @@ python3 -m perception.visualize_perception --device cpu       # CPU-only
 ```
 
 ### Playing Trained Policy
+
+`--terrain {flat,rough,rudin}` and `--obs-mode {blind,height,depth}` mirror the
+training configuration, so a policy trained on the curriculum terrain with a
+height scan or depth camera can be watched on the terrain it was trained for.
+`--obs-mode` must match the checkpoint, since it determines the observation size
+and the policy class:
+
+```bash
+python3 play_many_dog.py --terrain rudin --obs-mode height --num_envs 64 \\
+    --weights results/train/height_s0/quad_diffsim_srbd_align_multi_robot.pth
+```
+
+`--terrain-level N` spawns every robot on difficulty row N (and switches the
+promote/demote curriculum off so they stay there), and `--terrain-col` takes a
+column index or a family name (`stairs up`, `stairs down`, `smooth slope`,
+`rough slope`, `discrete obstacles`). Without them the env spreads robots randomly
+over rows 0-5, so playback shows the policy on easy terrain no matter what the run
+achieved -- pin the cell to photograph a policy at the difficulty it actually
+reached (read that off `final_state.json`):
+
+```bash
+python3 play_many_dog.py --terrain rudin --obs-mode height --num_envs 32 \\
+    --terrain-level 6 --terrain-col "stairs up" \\
+    --weights results/train/height_s0/quad_diffsim_srbd_align_multi_robot.pth
+```
+
 
 ```bash
 # Default playback (4 dogs, random velocity commands)
@@ -209,13 +340,15 @@ Main configuration in `EnvCfg` class in `config.py`:
 - `use_terrain_loss = False`: terrain-relative height loss + swing-foot clearance loss, sampled differentiably at SRBD-predicted positions
 - `perception`: a `PerceptionCfg` with camera intrinsics/mounting, height-grid extent and the loss-field blur (`hm_loss_blur_cells`)
 
-The `PERCEPTION_TERRAIN` environment variable in `train.py` sets these
-consistently per mode, so they rarely need to be touched by hand.
+The `MODE` environment variable in `train.py` sets these consistently per mode
+(see [Run modes](#run-modes-mode)), so they rarely need to be touched by hand.
 
 ### Global Switches
 - `PURE_PAPER_MODE = True`: Pure paper version (no engineering tricks)
 - `ONLY_ITERATE_NO_RESET = True`: Only reset on first iteration
-- `CUDA_KERNEL_SRBD` (default `True` in `config.py`): Use the custom fused CUDA kernel for `_srbd_step`. Requires `python setup.py build_ext --inplace` once; if the extension is missing the code prints a warning and falls back to the pure-PyTorch path automatically, so the flag is always safe. Set `False` to force the PyTorch reference implementation (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional)).
+- `DEBUG_TRAIN` (default `False`; env var `DEBUG_TRAIN=1`): Verbose training diagnostics. Off by default because every one of them forces a GPU->CPU synchronisation inside the training loop -- see [Debugging Features](#debugging-features).
+- `FORCE_DTYPE` (default `fp32`; env var `FORCE_DTYPE=fp64`): Precision of the damped-pseudo-inverse solve in `env.estimate_foot_forces`, which runs once per physics step regardless of the SRBD backend (the fused CUDA kernel is pure fp32 and does not touch it). `fp32` matches the inherited implementation and is what ships. `fp64` was used for a while after the batched rewrite, so that batched and per-env-loop results agreed tightly enough for a strict parity assertion -- a testing decision rather than a physics one -- and it is expensive: consumer GPUs run fp64 at 1/32 of fp32, and this solve runs 24 times per training iteration. The accuracy cost of `fp32` is bounded by `clamp(S, min=1e-3)` on the singular values and measures ~1e-5 N against foot forces of 10-100 N that are then clamped to [20, 250] N; `tests/test_vectorization.py` asserts that bound explicitly. `fp64` stays available as the verification reference. Never change it midway through a training campaign: it changes the numbers the policy trains on.
+- `CUDA_KERNEL_SRBD` (default `True` in `config.py`; env var `CUDA_KERNEL_SRBD=0`): Use the custom fused CUDA kernel for `_srbd_step`. Requires `python setup.py build_ext --inplace` once; if the extension is missing the code prints a warning and falls back to the pure-PyTorch path automatically, so the flag is always safe. Set `0`/`False` to force the PyTorch reference implementation (see [SRBD CUDA Kernel](#srbd-cuda-kernel-optional)). Note the fallback catches a missing extension, **not** an extension built for the wrong GPU architecture -- that fails at the first kernel launch instead; see `setup.py`.
 
 ## Training Output
 
@@ -249,7 +382,7 @@ After training completes, the following files are generated in the `results/` fo
 - **policy.py**: Neural network policies — blind MLP (`Policy`) and depth-CNN vision policy (`DepthEncoder` + `VisionPolicy`)
 - **gait.py**: `GaitPlanner` class, handles gait planning, phase management, foothold calculation
 - **srbd.py**: `SRBDModel` class, implements differentiable rigid body dynamics forward propagation
-- **env.py**: `RealQuadEnv` class, wraps Isaac Gym simulation environment (+ optional perception collector)
+- **env.py**: `RealQuadEnv` class, wraps Isaac Gym simulation environment (+ optional perception collector). Note that `env.step()` returns `(None, extra, q_err, q_ref12)` -- the first slot mirrors the Gym `obs, ...` signature but is deliberately always `None`. Callers read the observation themselves with `env.get_obs()` at the top of their loop, which is also the correct place: it happens *after* any `reset_envs`, whereas an observation built inside `step()` would be pre-reset and stale
 - **perception/**: Self-contained terrain-perception package (Warp depth camera + differentiable height sampling); no Isaac Gym dependency, works standalone
 - **train.py**: Training main loop, includes loss calculation, backpropagation, model saving
 - **evaluate_rudin_comparison.py**: Deterministic evaluation producing metrics directly comparable to Rudin's legged_gym logs
@@ -571,20 +704,61 @@ waits) → `ncu` (fix the specific kernel) → re-measure with Step 5. Save each
 
 ## Debugging Features
 
-### Initial Fall Debugging Prints
-Set in `config.py`:
+The four diagnostics below are **off by default** and share one switch. Each of them calls
+`.item()`, `.cpu()` or `bool()` on a GPU tensor, which forces a GPU->CPU synchronisation:
+the CPU has to stop and wait for the GPU to finish everything queued so far, draining the
+pipeline that normally keeps the two overlapping. That cost is fixed per iteration, so
+leaving them on inflates the small-batch end of any throughput measurement and distorts a
+PyTorch-vs-CUDA comparison.
+
+```bash
+DEBUG_TRAIN=1 python train.py     # verbose: all four diagnostics below
+python train.py                   # default: quiet -- use this for campaigns and benchmarks
+```
+
+`DEBUG_TRAIN` is read from the environment by `config.py` (unset -> `False`). It has to be an
+environment variable rather than a CLI flag because `config.py` is imported at module scope,
+long before any argument parsing could run.
+
+### Gradient flow analysis (`DEBUG_TRAIN=1`)
+Prints the pre-clip gradient norm of every named parameter each iteration, and warns when the
+input-most layer's gradient collapses below `1e-9` -- the symptom of the SRBD -> policy
+gradient path being broken (`net.0.weight` for `Policy`, `encoder.conv.0.weight` for
+`VisionPolicy`). One sync per parameter, hence the gate. Runs before `clip_grad_norm_`, so the
+values are pre-clip.
+
+**Always on:** the total pre-clip gradient norm appears in the progress bar as `|g|`.
+`clip_grad_norm_` computes it anyway and returns it, so this costs one sync per iteration
+instead of one per parameter.
+
+### Per-env velocity print (`DEBUG_TRAIN=1`)
+Each robot's time-averaged body-frame `vx`, every iteration. At `num_envs = 1024` that is a
+device->host copy plus 1024 formatted floats printed per iteration.
+
+### Direction checking (`DEBUG_TRAIN=1`)
+Body-frame vs. world-frame velocity for robot 0 every 20 iterations, to verify the velocity
+command is being tracked in the right frame.
+
+### Stride print (`DEBUG_TRAIN=1`)
+Per-leg touchdown-to-touchdown stride length for robot 0, printed from inside `env.step()`.
+This is the most expensive of the four: its `if touchdown[b0].any()` guard puts a GPU tensor
+in an `if`, which forces a sync on **every physics step** -- 24 per training iteration, versus
+one for each of the others. `_stride_print_limit` caps the *printing* after 200 strides per
+leg but never the *syncing*, so `DEBUG_TRAIN` is what actually removes the cost. The
+`last_contact_xy` / `last_contact_z` updates surrounding that block are real state read by the
+gait planner and are deliberately **not** gated.
+
+### Initial fall debugging prints
+A separate switch, because it is a bounded startup burst rather than per-iteration overhead:
+`self.t` is zeroed only by the full `env.reset()`, which under `ONLY_ITERATE_NO_RESET = True`
+runs once, so the block fires for the first 250 steps of a run and then stays silent. Set in
+`config.py`:
 ```python
 DBG_INIT_FALL = True
 DBG_INIT_FALL_STEPS = 250  # Only print first 250 steps
 DBG_INIT_FALL_EVERY = 5    # Print every 5 steps
 DBG_INIT_FALL_ENV = 0      # Only watch dog 0
 ```
-
-### Gradient Flow Analysis
-Training automatically prints gradient norms for each layer to diagnose vanishing/exploding gradients.
-
-### Direction Checking
-Prints body velocity direction every 20 iterations to verify velocity tracking is correct.
 
 ## FAQ
 
@@ -609,10 +783,13 @@ from isaacgym import gymapi  # Will error
 
 ### Q: Training is slow?
 A:
-1. Ensure `use_gpu_pipeline = True`
-2. Increase `num_envs` (more parallel environments)
-3. Turn off `use_viewer` (don't render during training)
-4. Use a faster GPU
+1. Leave `DEBUG_TRAIN` unset (the default). With `DEBUG_TRAIN=1` every iteration forces
+   several GPU->CPU synchronisations and prints one line per robot -- see
+   [Debugging Features](#debugging-features)
+2. Ensure `use_gpu_pipeline = True`
+3. Increase `num_envs` (more parallel environments)
+4. Turn off `use_viewer` (don't render during training)
+5. Use a faster GPU
 
 To find the *actual* bottleneck instead of guessing, see
 [Profiling & Finding Bottlenecks](#profiling--finding-bottlenecks-linux).
