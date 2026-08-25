@@ -5,7 +5,9 @@ root and produces:
 
     runs.csv                one row per run -- the table for the thesis
     fig_speed_itps.png      Experiment 1: iterations/s vs. num_envs, one line per variant
-    fig_speed_mem.png       Experiment 1: peak GPU memory vs. num_envs
+    fig_speed_throughput.png    Experiment 1: robot-steps/s vs. num_envs -- the metric
+                            that shows batching paying off, where it/s alone does not
+    fig_speed_mem.png       Experiment 1: peak PyTorch-allocated GPU memory vs. num_envs
     fig_terrain_level.png   Experiment 2: mean terrain level vs. simulated time,
                             one line per condition, mean over seeds with a min/max band
     fig_curriculum_final.png    where each condition ENDED UP: the distribution of
@@ -17,18 +19,38 @@ Everything is derived from the run folders, so runs made days apart, or in a
 different checkout, land on the same axes as long as they were logged by
 ``bench_log.py``.
 
+Runs are sorted into experiments by their folder (``bench/`` -> Experiment 1,
+``train/`` -> Experiment 2, ``smoke/`` -> sizing probe, ``control/`` -> flat-ground
+learning-parity check) and each figure draws only the experiment it belongs to.
+
+``runs.csv`` is the thesis table, so it carries **Experiment 1 and 2 only**. Smoke
+probes and control runs are diagnostics -- they answer "does this work?", not "what
+did we measure?" -- and are left out; pass ``--include-diagnostics`` to list them
+too. Either way the run counts per experiment are printed, so nothing is hidden
+silently.
+
+Note on memory: ``peak_mem_mb`` is ``torch.cuda.max_memory_allocated()``, i.e. the
+PyTorch allocator only. It excludes Isaac Gym / PhysX buffers, the terrain trimesh
+and the CUDA context, so it is a fair variant-to-variant comparison but NOT total
+GPU usage. The figure is labelled accordingly.
+
 Usage:
     python collect_bench.py                                   # scans results/
     python collect_bench.py --results-dir results --out results/figures
-    python collect_bench.py --exp1-only                       # skip the training figure
+    python collect_bench.py --exp1-only                       # skip the training figures
+
+    # optional: draw the inherited (pre-rewrite) build as a reference point
+    python collect_bench.py --inherited-s-per-iter 4.64 --inherited-num-envs 16
 
 CPU-only: needs numpy + matplotlib, not torch or Isaac Gym.
 """
 
 import argparse
+import collections
 import csv
 import json
 import os
+import textwrap
 
 import matplotlib
 matplotlib.use("Agg")
@@ -70,6 +92,78 @@ def color_for(name, fallback_index=0):
     return PALETTE[COLOR_BY_NAME.get(name, fallback_index) % len(PALETTE)]
 
 
+# Which experiment a run belongs to. The campaign writes each run into
+# results/<experiment>/<name>/, so the top-level folder is the primary signal; the
+# fallback keeps ad-hoc RUN_DIRs classifiable.
+EXPERIMENT_BY_PREFIX = {"bench": "exp1", "train": "exp2", "smoke": "smoke",
+                        "control": "control"}
+SMOKE_MAX_ITERS = 100      # a sizing probe is shorter than a bench run
+
+
+def experiment_of(run):
+    """'exp1' (speed), 'exp2' (locomotion), 'smoke', 'control' or 'other'.
+
+    Mixing these is what broke the old figures: the 30-iteration smoke runs landed
+    in the Experiment 2 groups, which inflated every n= and -- far worse -- pulled
+    ``min(len(curve))`` down to 30, truncating the 5000-iteration curves.
+
+    'control' is the flat-ground learning-parity run against the inherited build.
+    It is blind + flat like a bench run, so without its own bucket it would land in
+    Experiment 1 and put a second point on top of bench/cuda_B16. It belongs in
+    runs.csv, but in no figure.
+    """
+    prefix = run["dir"].split("/")[0]
+    if prefix in EXPERIMENT_BY_PREFIX:
+        return EXPERIMENT_BY_PREFIX[prefix]
+    meta = run["meta"]
+    if meta.get("mode") == "blind":               # flat ground, no curriculum
+        return "exp1"
+    iters = meta.get("iters")
+    if isinstance(iters, int) and iters <= SMOKE_MAX_ITERS:
+        return "smoke"
+    return "exp2" if meta.get("terrain_type") == "rudin" else "other"
+
+
+def select(runs, *experiments):
+    """The subset of `runs` belonging to the given experiments."""
+    return [r for r in runs if experiment_of(r) in experiments]
+
+
+def seeds_of(runs):
+    """Distinct seeds across `runs`, sorted; runs with no recorded seed are skipped."""
+    return sorted({r["meta"].get("seed") for r in runs
+                   if r["meta"].get("seed") is not None})
+
+
+def seed_label(runs):
+    """'3 seeds' / '1 seed' -- what the mean and the band are actually taken over.
+
+    Counting runs (the old behaviour) reports 4 when three of them are seeds 0/1/2
+    and the fourth is a smoke probe. Counting distinct seeds cannot.
+    """
+    n = len(seeds_of(runs)) or len(runs)
+    return f"{n} seed" + ("s" if n != 1 else "")
+
+
+def steps_per_iter_of(run):
+    """Physics steps differentiated per training iteration (the BPTT window)."""
+    return int(run["meta"].get("steps_per_iter") or 24)
+
+
+def robot_steps_per_s(run):
+    """Throughput: robot experience generated per wall-second.
+
+    it/s falls as the batch grows, which makes fig_speed_itps read as if scaling
+    hurts. This is the number that says otherwise -- and multiplied by dt it is
+    also what puts this project and legged_gym on one axis.
+    """
+    ips = run["summary"].get("it_per_s_median")
+    B = run["meta"].get("num_envs")
+    if ips is None or B is None:
+        return None
+    return float(ips) * int(B) * steps_per_iter_of(run)
+
+
 def load_runs(root):
     """Every run folder under `root` that bench_log.py finished writing."""
     runs = []
@@ -101,15 +195,18 @@ def variant_of(run):
 
 def write_table(runs, out_dir):
     """One row per run: what it was, and what it measured."""
-    fields = ["dir", "mode", "variant", "num_envs", "seed", "iters_timed",
-              "it_per_s_median", "it_per_s_p10", "it_per_s_p90", "peak_mem_mb",
-              "total_wall_s", "final_terrain_level", "final_loss", "final_vx", "gpu"]
+    fields = ["dir", "experiment", "mode", "variant", "num_envs", "seed", "iters_timed",
+              "it_per_s_median", "it_per_s_p10", "it_per_s_p90", "robot_steps_per_s",
+              "peak_mem_mb", "total_wall_s", "final_terrain_level", "final_loss",
+              "final_vx", "gpu"]
     path = os.path.join(out_dir, "runs.csv")
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in runs:
-            row = {"dir": r["dir"], "variant": variant_of(r), "gpu": r["meta"].get("gpu")}
+            row = {"dir": r["dir"], "experiment": experiment_of(r),
+                   "variant": variant_of(r), "gpu": r["meta"].get("gpu"),
+                   "robot_steps_per_s": robot_steps_per_s(r)}
             row.update({k: v for k, v in r["summary"].items() if k in fields})
             row.setdefault("num_envs", r["meta"].get("num_envs"))
             row.setdefault("mode", r["meta"].get("mode"))
@@ -156,16 +253,24 @@ def _end_labels(ax, entries, headroom=0.22):
                     ha="left", fontweight="bold", annotation_clip=False)
 
 
-def plot_scaling(runs, out_dir, key, ylabel, title, filename, logy):
-    """Experiment 1: one line per variant, x = num_envs (log)."""
+def plot_scaling(runs, out_dir, value_fn, ylabel, title, filename, logy,
+                 caption=None, inherited=None):
+    """Experiment 1: one line per variant, x = num_envs (log).
+
+    `runs` is expected to be already narrowed to Experiment 1 (see `select`).
+    `value_fn(run) -> float | None` supplies the y value, so a figure can plot a
+    derived quantity (robot-steps/s) as easily as a logged one.
+    `inherited` is an optional (num_envs, y) reference point for the pre-rewrite
+    build, which has no run folder of its own.
+    """
     series = {}
     for r in runs:
-        B, y = r["meta"].get("num_envs"), r["summary"].get(key)
-        if B is None or y is None or r["meta"].get("mode") != "blind":
+        B, y = r["meta"].get("num_envs"), value_fn(r)
+        if B is None or y is None:
             continue
         series.setdefault(variant_of(r), []).append((int(B), float(y)))
     if not series:
-        print(f"[collect] no Experiment 1 runs found for {key}, skipping {filename}")
+        print(f"[collect] no Experiment 1 runs found, skipping {filename}")
         return
 
     fig, ax = plt.subplots(figsize=(6.4, 4.0), dpi=160)
@@ -178,14 +283,31 @@ def plot_scaling(runs, out_dir, key, ylabel, title, filename, logy):
         # top of each other; identity comes from the legend, backed by runs.csv.
         ax.plot(xs, ys, "-o", color=c, linewidth=2, markersize=6,
                 markeredgecolor="white", markeredgewidth=1.2, label=name, zorder=3)
+    xticks = {x for pts in series.values() for x, _ in pts}
+    if inherited is not None:
+        # A single measured point, not a curve -- drawn as a lone marker so it can
+        # never be read as a scaling line it has no data for.
+        bx, by = inherited
+        ax.plot([bx], [by], "D", color=color_for("inherited", 0), markersize=8,
+                markeredgecolor="white", markeredgewidth=1.4, zorder=4,
+                linestyle="none", label="inherited (single measurement)")
+        xticks.add(int(bx))
     ax.set_xscale("log", base=2)
     if logy:
         ax.set_yscale("log")
-    ax.set_xticks(sorted({x for pts in series.values() for x, _ in pts}))
+    ax.set_xticks(sorted(xticks))
     ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
     _style(ax, "parallel robots (num_envs)", ylabel, title)
     ax.legend(frameon=False, fontsize=8, labelcolor=INK_MUTED, loc="best")
-    fig.tight_layout()
+    if caption:
+        # Wrapped by hand: fig.text does no wrapping, and an unwrapped caption
+        # runs off the right edge of the canvas instead of being clipped visibly.
+        lines = textwrap.wrap(caption, width=96)
+        fig.text(0.012, 0.012, "\n".join(lines), color=INK_MUTED, fontsize=7,
+                 ha="left", va="bottom", linespacing=1.5)
+        fig.tight_layout(rect=(0, 0.035 + 0.030 * len(lines), 1, 1))
+    else:
+        fig.tight_layout()
     path = os.path.join(out_dir, filename)
     fig.savefig(path, facecolor="white")
     plt.close(fig)
@@ -214,7 +336,7 @@ def plot_terrain_level(runs, results_dir, out_dir, filename="fig_terrain_level.p
         if arr.size == 0 or np.all(np.isnan(arr)):
             continue
         dt_sim = float(r["meta"].get("sim_seconds_per_iter", 0.048))
-        by_mode.setdefault(mode, []).append((arr, dt_sim))
+        by_mode.setdefault(mode, []).append((arr, dt_sim, r))
     if not by_mode:
         print("[collect] no Experiment 2 runs with a terrain_level column, skipping figure")
         return
@@ -222,8 +344,14 @@ def plot_terrain_level(runs, results_dir, out_dir, filename="fig_terrain_level.p
     fig, ax = plt.subplots(figsize=(6.8, 4.2), dpi=160)
     labels = []
     for i, (mode, entries) in enumerate(sorted(by_mode.items())):
-        n = min(a.size for a, _ in entries)
-        stack = np.vstack([a[:n] for a, _ in entries])
+        # Pad to the LONGEST run and average with nan-aware ops, rather than
+        # truncating to the shortest. Truncating let one short run chop the curve
+        # for every seed -- that is what pinned this figure to 30 iterations while
+        # smoke runs were still being grouped in here.
+        n = max(a.size for a, _, _ in entries)
+        stack = np.full((len(entries), n), np.nan)
+        for row_i, (a, _, _) in enumerate(entries):
+            stack[row_i, :a.size] = a
         x = np.arange(n) * entries[0][1]
         mean = np.nanmean(stack, axis=0)
         c = color_for(mode, i)
@@ -232,7 +360,7 @@ def plot_terrain_level(runs, results_dir, out_dir, filename="fig_terrain_level.p
             ax.fill_between(x, np.nanmin(stack, axis=0), np.nanmax(stack, axis=0),
                             color=c, alpha=0.15, linewidth=0, zorder=2)
         ax.plot(x, mean, color=c, linewidth=2, zorder=3,
-                label=f"{label}  (n={stack.shape[0]})")
+                label=f"{label}  ({seed_label([e[2] for e in entries])})")
         labels.append((x[-1], float(mean[-1]), label, c))
     _style(ax, "simulated time per robot (s)", "mean terrain level",
            "Curriculum progress by perception condition")
@@ -246,7 +374,11 @@ def plot_terrain_level(runs, results_dir, out_dir, filename="fig_terrain_level.p
 
 
 def _load_final_states(runs, results_dir):
-    """{mode: [final_state.json, ...]} for every run that reached the end."""
+    """{mode: [(final_state.json, run), ...]} for every run that reached the end.
+
+    The run travels with its state so the figures can label by distinct seed
+    rather than by run count.
+    """
     by_mode = {}
     for r in runs:
         mode = r["meta"].get("mode")
@@ -256,7 +388,7 @@ def _load_final_states(runs, results_dir):
         if not os.path.isfile(path):
             continue
         with open(path) as f:
-            by_mode.setdefault(mode, []).append(json.load(f))
+            by_mode.setdefault(mode, []).append((json.load(f), r))
     return by_mode
 
 
@@ -273,14 +405,14 @@ def plot_curriculum_final(runs, results_dir, out_dir, filename="fig_curriculum_f
         return
 
     modes = [m for m in sorted(by_mode, key=lambda m: -np.mean(
-        [st["mean_terrain_level"] for st in by_mode[m]]))]
-    num_rows = by_mode[modes[0]][0]["num_rows"]
+        [st["mean_terrain_level"] for st, _ in by_mode[m]]))]
+    num_rows = by_mode[modes[0]][0][0]["num_rows"]
     ramp = [DIFFICULTY_RAMP[int(round(i * (len(DIFFICULTY_RAMP) - 1) / max(1, num_rows - 1)))]
             for i in range(num_rows)]
 
     fig, ax = plt.subplots(figsize=(7.2, 0.62 * len(modes) + 2.0), dpi=160)
     for row_i, mode in enumerate(modes):
-        states = by_mode[mode]
+        states = [st for st, _ in by_mode[mode]]
         counts = np.sum([st["terrain_level_hist"] for st in states], axis=0).astype(float)
         share = counts / max(counts.sum(), 1.0)
         left = 0.0
@@ -302,8 +434,8 @@ def plot_curriculum_final(runs, results_dir, out_dir, filename="fig_curriculum_f
                 fontsize=8, color=INK_MUTED, transform=ax.get_yaxis_transform())
 
     ax.set_yticks(range(len(modes)))
-    ax.set_yticklabels([f"{LABEL.get(m, m)}  (n={len(by_mode[m])})" for m in modes],
-                       fontsize=9, color=INK)
+    ax.set_yticklabels([f"{LABEL.get(m, m)}  ({seed_label([r for _, r in by_mode[m]])})"
+                        for m in modes], fontsize=9, color=INK)
     ax.set_xlim(0, 1)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
     ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
@@ -328,13 +460,14 @@ def plot_terrain_by_type(runs, results_dir, out_dir, filename="fig_terrain_by_ty
         return
 
     families = [f for f in FAMILY_ORDER
-                if any(f in st["by_terrain_family"] for sts in by_mode.values() for st in sts)]
+                if any(f in st["by_terrain_family"]
+                       for sts in by_mode.values() for st, _ in sts)]
     modes = sorted(by_mode)
     table = {}
     for mode in modes:
         for fam in families:
             vals = [st["by_terrain_family"][fam]["mean_terrain_level"]
-                    for st in by_mode[mode] if fam in st["by_terrain_family"]]
+                    for st, _ in by_mode[mode] if fam in st["by_terrain_family"]]
             table[(mode, fam)] = float(np.mean(vals)) if vals else np.nan
 
     csv_path = os.path.join(out_dir, "terrain_by_type.csv")
@@ -342,7 +475,8 @@ def plot_terrain_by_type(runs, results_dir, out_dir, filename="fig_terrain_by_ty
         w = csv.writer(f)
         w.writerow(["mode", "n_seeds"] + families)
         for mode in modes:
-            w.writerow([mode, len(by_mode[mode])] + [table[(mode, fam)] for fam in families])
+            n_seeds = len(seeds_of([r for _, r in by_mode[mode]])) or len(by_mode[mode])
+            w.writerow([mode, n_seeds] + [table[(mode, fam)] for fam in families])
     print(f"[collect] wrote {csv_path}")
 
     fig, ax = plt.subplots(figsize=(7.2, 4.0), dpi=160)
@@ -351,7 +485,8 @@ def plot_terrain_by_type(runs, results_dir, out_dir, filename="fig_terrain_by_ty
     for i, mode in enumerate(modes):
         vals = [table[(mode, fam)] for fam in families]
         ax.bar(x + i * width - 0.4 + width / 2, vals, width * 0.88,
-               color=color_for(mode, i), label=f"{LABEL.get(mode, mode)}  (n={len(by_mode[mode])})",
+               color=color_for(mode, i),
+               label=f"{LABEL.get(mode, mode)}  ({seed_label([r for _, r in by_mode[mode]])})",
                edgecolor="white", linewidth=0.9, zorder=3)
     ax.set_xticks(x)
     ax.set_xticklabels(families, fontsize=8.5)
@@ -373,7 +508,18 @@ def main():
     parser.add_argument("--out", default=None,
                         help="Where to write the table and figures (default: --results-dir)")
     parser.add_argument("--exp1-only", action="store_true",
-                        help="Skip the Experiment 2 terrain-level figure")
+                        help="Skip the Experiment 2 figures")
+    parser.add_argument("--include-diagnostics", action="store_true",
+                        help="Also list smoke / control runs in runs.csv. They are "
+                             "diagnostics, not results, so they are excluded by default.")
+    parser.add_argument("--inherited-s-per-iter", type=float, default=None,
+                        help="Seconds per iteration measured for the inherited "
+                             "(pre-rewrite) build; drawn as a reference point on the "
+                             "Experiment 1 figures. It has no run folder of its own.")
+    parser.add_argument("--inherited-num-envs", type=int, default=16,
+                        help="Batch size that measurement was taken at (default: 16)")
+    parser.add_argument("--inherited-steps-per-iter", type=int, default=24,
+                        help="Physics steps per iteration for that build (default: 24)")
     args = parser.parse_args()
 
     out_dir = args.out or args.results_dir
@@ -383,15 +529,49 @@ def main():
     if not runs:
         raise SystemExit(f"no run folders with summary.json found under {args.results_dir!r}")
 
-    write_table(runs, out_dir)
-    plot_scaling(runs, out_dir, "it_per_s_median", "iterations / s",
-                 "Training throughput vs. batch size", "fig_speed_itps.png", logy=True)
-    plot_scaling(runs, out_dir, "peak_mem_mb", "peak GPU memory (MB)",
-                 "Peak GPU memory vs. batch size", "fig_speed_mem.png", logy=False)
+    counts = collections.Counter(experiment_of(r) for r in runs)
+    print("[collect] runs by experiment: "
+          + ", ".join(f"{k}={counts[k]}" for k in sorted(counts)))
+
+    exp1, exp2 = select(runs, "exp1"), select(runs, "exp2")
+
+    # runs.csv is a results table: measurements only. Smoke probes and control runs
+    # are diagnostics and stay out unless asked for.
+    table_runs = runs if args.include_diagnostics else exp1 + exp2
+    skipped = len(runs) - len(table_runs)
+    if skipped:
+        print(f"[collect] runs.csv: {skipped} diagnostic run(s) excluded "
+              f"(--include-diagnostics to list them)")
+    write_table(sorted(table_runs, key=lambda r: r["dir"]), out_dir)
+
+    ref_itps = ref_steps = None
+    if args.inherited_s_per_iter:
+        ips = 1.0 / args.inherited_s_per_iter
+        ref_itps = (args.inherited_num_envs, ips)
+        ref_steps = (args.inherited_num_envs,
+                     ips * args.inherited_num_envs * args.inherited_steps_per_iter)
+
+    plot_scaling(exp1, out_dir, lambda r: r["summary"].get("it_per_s_median"),
+                 "iterations / s", "Training throughput vs. batch size",
+                 "fig_speed_itps.png", logy=True, inherited=ref_itps)
+    plot_scaling(exp1, out_dir, robot_steps_per_s,
+                 "robot-steps / s", "Simulation throughput vs. batch size",
+                 "fig_speed_throughput.png", logy=True, inherited=ref_steps,
+                 caption="robot-steps/s = median it/s x num_envs x steps_per_iter. "
+                         "Per-iteration cost grows sublinearly in the batch, so "
+                         "throughput rises even as iterations/s falls.")
+    plot_scaling(exp1, out_dir, lambda r: r["summary"].get("peak_mem_mb"),
+                 "peak PyTorch-allocated GPU memory (MB)",
+                 "Peak PyTorch-allocated GPU memory vs. batch size",
+                 "fig_speed_mem.png", logy=False,
+                 caption="torch.cuda.max_memory_allocated(): the PyTorch allocator only. "
+                         "Excludes Isaac Gym / PhysX buffers, the terrain trimesh and the "
+                         "CUDA context, so this is a variant-to-variant comparison, not "
+                         "total GPU usage.")
     if not args.exp1_only:
-        plot_terrain_level(runs, args.results_dir, out_dir)
-        plot_curriculum_final(runs, args.results_dir, out_dir)
-        plot_terrain_by_type(runs, args.results_dir, out_dir)
+        plot_terrain_level(exp2, args.results_dir, out_dir)
+        plot_curriculum_final(exp2, args.results_dir, out_dir)
+        plot_terrain_by_type(exp2, args.results_dir, out_dir)
 
 
 if __name__ == "__main__":
