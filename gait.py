@@ -213,6 +213,10 @@ class GaitPlanner:
         is_swing = (u >= beta4)
         swing_phase = torch.where(is_swing, raw, torch.zeros_like(u))  # (B,4)
         s = swing_phase.unsqueeze(-1)                                   # (B,4,1)
+        # Published for the terrain-clearance loss, which modulates its required margin by the
+        # same swing profile this parabola uses (see train.py). Derived from `phases`, which
+        # carries no gradient, so caching it costs nothing and detaching changes nothing.
+        self.swing_progress = swing_phase.detach()                      # (B,4)
 
         # Start point p0 (world)
         p0 = self.last_liftoff_xyz.detach().clone()                     # (B,4,3)

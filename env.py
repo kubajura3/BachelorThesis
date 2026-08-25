@@ -84,6 +84,10 @@ class RealQuadEnv:
         self.init_done = False
         self.max_episode_length_s = float(cfg.episode_length_s)
         self.max_episode_length = int(math.ceil(self.max_episode_length_s / cfg.dt))
+        # Promote / demote counts since the training loop last read them (see
+        # _update_terrain_curriculum). Kept on device; the loop zeroes them each iteration.
+        self.n_move_up = torch.zeros((), dtype=torch.long, device=self.device)
+        self.n_move_down = torch.zeros((), dtype=torch.long, device=self.device)
 
 
         # thigh - upper leg; calf - lower leg
@@ -718,6 +722,12 @@ class RealQuadEnv:
         # robots that covered less than half their commanded distance go to simpler terrain
         cmd_speed = torch.norm(self.cmd_rand[env_ids, 0:2], dim=1)
         move_down = (distance < cmd_speed * self.max_episode_length_s * 0.5) & (~move_up)
+        # Diagnostic counters: the campaign could not tell a level collapse caused by robots
+        # falling from one caused by the promote/demote rule itself, because neither direction
+        # was ever counted. Accumulated as tensors and read once per iteration by the training
+        # loop (which zeroes them), so this adds no GPU->CPU sync inside the step loop.
+        self.n_move_up += move_up.sum()
+        self.n_move_down += move_down.sum()
         self.terrain_levels[env_ids] += move_up.long() - move_down.long()
         # robots that solve the last level are sent to a random one (else clamp at >= 0)
         self.terrain_levels[env_ids] = torch.where(
@@ -1510,7 +1520,14 @@ class RealQuadEnv:
                  # Never let a debug print break training.
                  pass
 
-        fallen_height = (self.base_pos[:, 2] < 0.16)           # (B,)
+        # Base height measured from the ground *under the robot*, not from the world datum.
+        # Robots spawn terrain-relative (_write_spawn_pose: z = _terrain_height(xy) + h0), so an
+        # absolute threshold killed everything standing on a cell whose surface sits below
+        # -(h0 - 0.16) = -0.19 m -- all seven stairs-down columns, on the frame they spawned.
+        # Same lookup that decides the spawn height, so the two agree by construction, and it
+        # returns zeros on a flat plane, leaving flat-ground behaviour bit-for-bit unchanged.
+        base_h = self.base_pos[:, 2] - self._terrain_height(self.base_pos[:, :2])
+        fallen_height = (base_h < 0.16)                        # (B,)
         fallen_tilt   = (torch.abs(self.roll) > 0.9) | (torch.abs(self.pitch) > 0.9)
         done = fallen_height | fallen_tilt                     # (B,)
 

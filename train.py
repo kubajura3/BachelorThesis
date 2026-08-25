@@ -243,6 +243,10 @@ def train(num_iters=1000, steps_per_iter=24,
     a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01, 0.5, 5.0
     a7 = 3.0
     use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
+    # True only on the Rudin curriculum grid. Gates the terrain-relative height reference and
+    # the commanded-yaw reference below, so flat / rough runs keep their previous behaviour
+    # exactly (and the flat control run stays a valid regression test of both).
+    on_terrain = (cfg.terrain_type == "rudin")
 
     pbar = tqdm(range(num_iters), ncols=92)
     losses = []; rewards = []
@@ -287,6 +291,7 @@ def train(num_iters=1000, steps_per_iter=24,
         foot_ref_hist = []
         clearance_hist = []
         cmd_hist = []       # per-step high-level command [vx_cmd, vy_cmd, yaw_cmd]
+        yawref_hist = []    # per-step commanded yaw reference (terrain only; see loss_yaw)
 
 
         hx = None
@@ -379,17 +384,35 @@ def train(num_iters=1000, steps_per_iter=24,
 
             v_hat3 = env.srbd_v.clone()           # (B,3)
             pz_hat = env.srbd_p[:, 2]            # (B,)
-            if use_terrain_loss:
-                # Terrain-relative base height: (pz - terrain_z) is compared to h0 in
-                # loss_h / r_stab below. terrain_z is sampled differentiably at the
-                # SRBD xy, so the local terrain slope back-props into the policy.
-                terr_z = env.terrain_height_diff(env.srbd_p[:, :2].unsqueeze(1)).squeeze(1)  # (B,)
-                pz_hat = pz_hat - terr_z
+            if on_terrain:
+                # Terrain-relative base height: (pz - terrain_z) is what loss_h compares to h0.
+                # Unconditional on terrain, NOT gated on use_terrain_loss -- gating it there made
+                # that flag switch two things at once (add the clearance term AND fix the height
+                # loss), which confounded the 2x2 ablation: blind_rudin/hobs measured loss_h from
+                # the world datum and so were told to stand h0 above z=0 regardless of the ground
+                # under them. Grad-free lookup on purpose: the reference is the terrain, so no
+                # terrain information leaks into the gradient and the blind arm stays blind. The
+                # gradient still flows through pz itself, which is the quantity being controlled.
+                # Sampled at the *real* base xy, not the SRBD xy: the SRBD xy is only pinned to
+                # the real position when use_terrain_loss is set (see the alpha-align block
+                # above), so on the blind arms it drifts and would read the ground at the wrong
+                # spot. Being grad-free there is no reason to prefer the SRBD position, and this
+                # makes loss_h measure exactly the height the fall check thresholds on.
+                pz_hat = pz_hat - env._terrain_height(env.base_pos[:, :2])
 
             v_world_hist.append(v_hat3.clone())
             q_body_hist.append(env.srbd_q.clone())
             pz_hist.append(pz_hat.clone())
             cmd_hist.append(env.cmd_rand.clone())      # current [vx_cmd, vy_cmd, yaw_cmd]
+            if on_terrain:
+                # Where the yaw command says this robot should be pointing right now: the yaw it
+                # was reset to, plus the commanded yaw rate integrated over its time since reset.
+                # Captured per step rather than rebuilt after the loop so that a robot which
+                # resets mid-window pairs its pre-reset yaw with its pre-reset elapsed time --
+                # both fields change together on reset_envs.
+                yawref_hist.append(
+                    env.last_reset_yaw + env.cmd_rand[:, 2] * env.ep_len_buf.to(env.cmd_rand.dtype) * cfg.dt
+                )
             ureg_hist.append(a.clone())
 
             p_foot_srbd = env.srbd.foot_positions_srbd(qref)  # (B,4,3)
@@ -402,7 +425,19 @@ def train(num_iters=1000, steps_per_iter=24,
                 # xy, so the gradient both lifts the foot (z) and pushes the foothold
                 # away from riser edges (xy, via the terrain slope).
                 foot_tz = env.terrain_height_diff(p_foot_srbd[..., :2])       # (B,4)
-                clear_margin = h_tar.view(B, 1)                                # swing apex target
+                # Required clearance follows the swing phase instead of being a constant
+                # swing_height. _swing_parabola interpolates through (liftoff, apex, touchdown),
+                # giving z(s) = z0 + (z1-z0)*s^2 + 4*h*s*(1-s) -- so between feet at equal height
+                # it lifts exactly 4*h*s*(1-s): zero at both ends, h at mid-swing. A constant
+                # margin demanded h even at the instants the foot must be on the ground, so the
+                # term had a floor it could never reach and fought loss_foot (weight 5.0) at
+                # every touchdown -- which is why loss_clear ran backwards in every terrain-loss
+                # run. Modulated, it asks for that same arc but referenced to the terrain rather
+                # than to last_contact_z, so it is positive exactly where the terrain-blind arc
+                # under-clears: the s^2 base makes the swing sag below a straight line onto a
+                # rising step, clipping a 0.20 m riser by ~0.08 m even when the target rises.
+                s_swing = env.gait.swing_progress                              # (B,4)
+                clear_margin = h_tar.view(B, 1) * 4.0 * s_swing * (1.0 - s_swing)
                 clear_viol = torch.relu(foot_tz + clear_margin - p_foot_srbd[..., 2])
                 clearance_hist.append(clear_viol * swing_mask.squeeze(-1))     # (B,4)
 
@@ -448,8 +483,18 @@ def train(num_iters=1000, steps_per_iter=24,
             cosy_cosp = 1.0 - 2.0 * (qy*qy + qz*qz)
             yaw_seq = torch.atan2(siny_cosp, cosy_cosp)   # (T,B)
 
-            # reference yaw: the yaw at reset (no grad)
-            yaw_ref = env.last_reset_yaw.detach().view(1, B).expand_as(yaw_seq)
+            # Reference yaw (no grad): the yaw at reset, advanced by the *commanded* yaw rate.
+            # Holding the reset yaw is right only when the yaw command is zero; on the Rudin
+            # terrain _sample_command draws it from +-1 rad/s, so the old fixed reference
+            # penalised a robot for obeying its own command -- and since the reference was
+            # pinned at reset and an episode is ~417 iterations, the penalty saturated near
+            # pi^2 * yaw_w instead of decaying. Integrating the command makes this yaw tracking,
+            # matching Rudin's tracking_ang_vel reward. Off the Rudin terrain nothing is
+            # recorded, so flat / rough fall through to the previous expression unchanged.
+            if yawref_hist:
+                yaw_ref = torch.stack(yawref_hist).detach()                        # (T,B)
+            else:
+                yaw_ref = env.last_reset_yaw.detach().view(1, B).expand_as(yaw_seq)
 
             # wrap to [-pi, pi]
             yaw_err = torch.atan2(torch.sin(yaw_seq - yaw_ref), torch.cos(yaw_seq - yaw_ref))
@@ -616,10 +661,21 @@ def train(num_iters=1000, steps_per_iter=24,
         terrain_level = float(levels.float().mean().item()) if levels is not None else float("nan")
         terrain_level_iter.append(terrain_level)
 
+        # Curriculum promotions / demotions this iteration. Read and zeroed here so the
+        # counters cover exactly one iteration; without them a terrain_level collapse cannot
+        # be attributed to falls rather than to the promote/demote rule itself.
+        if levels is not None:
+            n_move_up = float(env.n_move_up.item())
+            n_move_down = float(env.n_move_down.item())
+            env.n_move_up.zero_(); env.n_move_down.zero_()
+        else:
+            n_move_up = n_move_down = float("nan")
+
         bench.stop(loss=loss.item(), vx=vx_for_plot, grad_norm=grad_norm,
                    terrain_level=terrain_level,
                    loss_v=loss_v_hist_iter[-1], loss_clear=loss_clear_hist_iter[-1],
-                   n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter))
+                   n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter),
+                   n_move_up=n_move_up, n_move_down=n_move_down)
 
         vx_iter_track.append(vx_for_plot)
         losses.append(loss.item()); rewards.append(episodic_reward)
