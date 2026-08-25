@@ -3,10 +3,10 @@
 # results/
 
 # Trained models / metrics (in case anything still lands in the repo root)
-*.pth
-*.pt
-*.npy
-*.png
+# *.pth
+# *.pt
+# *.npy
+# *.png
 
 # ===== Python =====
 __pycache__/
