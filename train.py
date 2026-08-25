@@ -298,6 +298,13 @@ def train(num_iters=1000, steps_per_iter=24,
         hx_hold = None
         n_falls_iter = 0
         n_timeouts_iter = 0
+        # Fall-cause diagnostics (see bench.stop below). Which half of env.py's fall rule
+        # fired, and how high the base sat while it did -- the campaign could only see the
+        # OR of the two, so a robot dropping flat and a robot toppling looked identical.
+        n_fall_h_iter = 0        # falls where the height half fired
+        n_fall_t_iter = 0        # falls where the tilt half fired (both can fire at once)
+        base_h_sum = 0.0         # sum over steps of the batch-mean base height
+        base_h_min = None        # running min over steps x batch, kept on device
 
         a_prev = torch.zeros(B, 12, device=device)
 
@@ -451,6 +458,13 @@ def train(num_iters=1000, steps_per_iter=24,
             gproj_hist.append(torch.einsum('bji,j->bi', R_b, g_w))  # (B,3)
 
             done = extra["done"]              # (B,) falls
+            # Base height, sampled every step (not only on the steps that had a fall) and
+            # before reset_envs runs below, so it measures the state that triggered the fall.
+            # Accumulated on device: the single float() per iteration sits next to the
+            # existing loss.item(), so no GPU->CPU sync enters the step loop.
+            bh = extra["base_h"]
+            base_h_sum = base_h_sum + bh.mean()
+            base_h_min = bh.min() if base_h_min is None else torch.minimum(base_h_min, bh.min())
             # Episode timeout (Rudin dynamic curriculum); all-False on flat/rough so behaviour there
             # is unchanged (reset set == falls). Falls AND timeouts both reset, but only falls are
             # penalised — Rudin gives no terminal reward for time-outs.
@@ -464,6 +478,10 @@ def train(num_iters=1000, steps_per_iter=24,
                 # no GPU->CPU sync inside the per-step loop.
                 n_falls_iter = n_falls_iter + done.sum()
                 n_timeouts_iter = n_timeouts_iter + timeout.sum()
+                # Safe inside this guard: fall_height and fall_tilt are subsets of done,
+                # which is a subset of reset_mask, so nothing is missed when it is false.
+                n_fall_h_iter = n_fall_h_iter + extra["fall_height"].sum()
+                n_fall_t_iter = n_fall_t_iter + extra["fall_tilt"].sum()
                 if done.any():
                     episodic_reward -= cfg.term_penalty * float(done.float().mean().item())
                 env.reset_envs(reset_ids)
@@ -675,7 +693,10 @@ def train(num_iters=1000, steps_per_iter=24,
                    terrain_level=terrain_level,
                    loss_v=loss_v_hist_iter[-1], loss_clear=loss_clear_hist_iter[-1],
                    n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter),
-                   n_move_up=n_move_up, n_move_down=n_move_down)
+                   n_move_up=n_move_up, n_move_down=n_move_down,
+                   n_fall_height=float(n_fall_h_iter), n_fall_tilt=float(n_fall_t_iter),
+                   mean_base_h=float(base_h_sum) / steps_per_iter,
+                   min_base_h=float(base_h_min) if base_h_min is not None else float("nan"))
 
         vx_iter_track.append(vx_for_plot)
         losses.append(loss.item()); rewards.append(episodic_reward)

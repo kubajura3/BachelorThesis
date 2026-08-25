@@ -1542,6 +1542,15 @@ class RealQuadEnv:
         extra = {
             "done": done,
             "timeout": timed_out,
+            # Which half of the fall rule fired, and how high the base actually sat. `done` is
+            # the OR of the two, so the overlap stays recoverable by arithmetic in the training
+            # loop: |H n T| = n_fall_height + n_fall_tilt - n_falls. Diagnostics only -- nothing
+            # here feeds the simulation or the loss. base_h is detached because step() is not
+            # under no_grad, so a per-step reduction in the loop must not be able to extend the
+            # BPTT graph (base_pos is an Isaac state slice, so this is belt-and-braces).
+            "fall_height": fallen_height,                  # (B,) bool
+            "fall_tilt": fallen_tilt,                      # (B,) bool
+            "base_h": base_h.detach(),                     # (B,) metres above the ground beneath
             "muN": torch.ones(self.B, device=self.device),
             "q_err_norm": torch.zeros(self.B, device=self.device),
         }
