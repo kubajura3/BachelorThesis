@@ -1,6 +1,6 @@
 # ===== Training outputs =====
 # All curves, metrics and trained models are written here by train.py.
-results/
+# results/
 
 # Trained models / metrics (in case anything still lands in the repo root)
 *.pth

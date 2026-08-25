@@ -1,0 +1,22 @@
+{
+  "iters_total": 100,
+  "iters_timed": 80,
+  "warmup": 20,
+  "t_iter_median_s": 0.6722198259994911,
+  "it_per_s_median": 1.4876086085576967,
+  "it_per_s_p10": 1.4192624291214113,
+  "it_per_s_p90": 1.5715027582103727,
+  "peak_mem_mb": 53.161472,
+  "total_wall_s": 68.28833467199911,
+  "final_loss": 1.9293955564498901,
+  "final_vx": 0.18503105640411377,
+  "final_grad_norm": 0.10225357860326767,
+  "final_terrain_level": NaN,
+  "final_loss_v": 0.17497681081295013,
+  "final_loss_clear": 0.0,
+  "final_n_falls": 54.0,
+  "final_n_timeouts": 0.0,
+  "mode": "blind",
+  "num_envs": 1024,
+  "seed": 0
+}

@@ -1,0 +1,383 @@
+Importing module 'gym_38' (/home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/jakub/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/jakub/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/jakub/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+[SRBD] Custom CUDA kernel active (CUDA_KERNEL_SRBD=True in config.py).
+[env] creating PhysX simulation
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[env] simulation created
+[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape
+[terrain] adding Rudin curriculum-grid triangle mesh
+[terrain] Rudin curriculum-grid mesh added
+[env] loading asset go2_description.urdf from /home/jakub/projects/BachelorThesis
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/base.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+Loading extension module gymtorch...
+
+[DBG] Asset DOFs in order:
+  00: FL_hip_joint
+  01: FL_thigh_joint
+  02: FL_calf_joint
+  03: FR_hip_joint
+  04: FR_thigh_joint
+  05: FR_calf_joint
+  06: RL_hip_joint
+  07: RL_thigh_joint
+  08: RL_calf_joint
+  09: RR_hip_joint
+  10: RR_thigh_joint
+  11: RR_calf_joint
+
+[DBG] Mapping to key12:
+  FL_hip       -> asset dof idx 0
+  FL_thigh     -> asset dof idx 1
+  FL_calf      -> asset dof idx 2
+  FR_hip       -> asset dof idx 3
+  FR_thigh     -> asset dof idx 4
+  FR_calf      -> asset dof idx 5
+  RL_hip       -> asset dof idx 6
+  RL_thigh     -> asset dof idx 7
+  RL_calf      -> asset dof idx 8
+  RR_hip       -> asset dof idx 9
+  RR_thigh     -> asset dof idx 10
+  RR_calf      -> asset dof idx 11
+[DBG] ctrl_idx (key12 -> raw_names index): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]
+[INFO] feet_local rigid bodies (FL,FR,RL,RR idx): [4, 8, 14, 18]
+driveMode unique (after set): {1}
+stiffness range: 60.0 – 60.0
+damping   range: 2.0 – 2.0
+[DBG] lower[12] = [-1.0472 -1.5708 -2.7227 -1.0472 -1.5708 -2.7227 -1.0472 -0.5236 -2.7227
+ -1.0472 -0.5236 -2.7227]
+[DBG] upper[12] = [ 1.0472   3.4907  -0.83776  1.0472   3.4907  -0.83776  1.0472   4.5379
+ -0.83776  1.0472   4.5379  -0.83776]
+[DBG] effort[12] = [23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43]
+[INFO] Jacobian detected as floating-base: cols=18, dof_count=12, offset=6
+[CHECK] foot_jacobians shape: (2048, 4, 3, 18)  (B,4,3,cols)
+[CHECK] J12 shape: (2048, 4, 3, 12)  (B,4,3,12)
+[CHECK] ||J12||: 45.843955993652344
+Warp 1.0.2 initialized:
+   CUDA Toolkit 11.5, Driver 13.0
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce GTX 1660 Ti" (6 GiB, sm_75, mempool enabled)
+   Kernel cache:
+     /home/jakub/.cache/warp/1.0.2
+[perception] collector ready (B=2048, device=cuda, terrain_type=rudin).
+[bench] logging to results/smoke/hloss
+  0%|                                                                | 0/30 [00:00<?, ?it/s]Iter    0 | loss 7.153 | v_body_x +0.01 | |g| 0.027:   0%|           | 0/30 [00:02<?, ?it/s]Iter    0 | loss 7.153 | v_body_x +0.01 | |g| 0.027:   3%|   | 1/30 [00:02<01:25,  2.96s/it]Iter    1 | loss 7.304 | v_body_x +0.05 | |g| 0.032:   3%|   | 1/30 [00:04<01:25,  2.96s/it]Iter    1 | loss 7.304 | v_body_x +0.05 | |g| 0.032:   7%|▏  | 2/30 [00:04<00:55,  1.96s/it]Iter    2 | loss 7.659 | v_body_x +0.08 | |g| 0.040:   7%|▏  | 2/30 [00:05<00:55,  1.96s/it]Iter    2 | loss 7.659 | v_body_x +0.08 | |g| 0.040:  10%|▎  | 3/30 [00:05<00:44,  1.65s/it]Iter    3 | loss 8.049 | v_body_x +0.11 | |g| 0.040:  10%|▎  | 3/30 [00:06<00:44,  1.65s/it]Iter    3 | loss 8.049 | v_body_x +0.11 | |g| 0.040:  13%|▍  | 4/30 [00:06<00:38,  1.50s/it]Iter    4 | loss 8.867 | v_body_x +0.16 | |g| 0.056:  13%|▍  | 4/30 [00:08<00:38,  1.50s/it]Iter    4 | loss 8.867 | v_body_x +0.16 | |g| 0.056:  17%|▌  | 5/30 [00:08<00:35,  1.42s/it]Iter    5 | loss 9.943 | v_body_x +0.21 | |g| 0.061:  17%|▌  | 5/30 [00:09<00:35,  1.42s/it]Iter    5 | loss 9.943 | v_body_x +0.21 | |g| 0.061:  20%|▌  | 6/30 [00:09<00:32,  1.37s/it]Iter    6 | loss 10.801 | v_body_x +0.22 | |g| 0.039:  20%|▍ | 6/30 [00:10<00:32,  1.37s/it]Iter    6 | loss 10.801 | v_body_x +0.22 | |g| 0.039:  23%|▍ | 7/30 [00:10<00:30,  1.34s/it]Iter    7 | loss 11.680 | v_body_x +0.20 | |g| 0.045:  23%|▍ | 7/30 [00:11<00:30,  1.34s/it]Iter    7 | loss 11.680 | v_body_x +0.20 | |g| 0.045:  27%|▌ | 8/30 [00:11<00:29,  1.32s/it]Iter    8 | loss 11.805 | v_body_x +0.19 | |g| 0.082:  27%|▌ | 8/30 [00:13<00:29,  1.32s/it]Iter    8 | loss 11.805 | v_body_x +0.19 | |g| 0.082:  30%|▌ | 9/30 [00:13<00:27,  1.31s/it]Iter    9 | loss 9.752 | v_body_x +0.13 | |g| 0.097:  30%|▉  | 9/30 [00:14<00:27,  1.31s/it]Iter    9 | loss 9.752 | v_body_x +0.13 | |g| 0.097:  33%|▋ | 10/30 [00:14<00:26,  1.31s/it]Iter   10 | loss 7.875 | v_body_x +0.08 | |g| 0.095:  33%|▋ | 10/30 [00:15<00:26,  1.31s/it]Iter   10 | loss 7.875 | v_body_x +0.08 | |g| 0.095:  37%|▋ | 11/30 [00:15<00:24,  1.31s/it]Iter   11 | loss 7.648 | v_body_x +0.04 | |g| 0.085:  37%|▋ | 11/30 [00:17<00:24,  1.31s/it]Iter   11 | loss 7.648 | v_body_x +0.04 | |g| 0.085:  40%|▊ | 12/30 [00:17<00:23,  1.31s/it]Iter   12 | loss 7.667 | v_body_x +0.08 | |g| 0.056:  40%|▊ | 12/30 [00:18<00:23,  1.31s/it]Iter   12 | loss 7.667 | v_body_x +0.08 | |g| 0.056:  43%|▊ | 13/30 [00:18<00:22,  1.31s/it]Iter   13 | loss 7.721 | v_body_x +0.10 | |g| 0.034:  43%|▊ | 13/30 [00:19<00:22,  1.31s/it]Iter   13 | loss 7.721 | v_body_x +0.10 | |g| 0.034:  47%|▉ | 14/30 [00:19<00:21,  1.32s/it]Iter   14 | loss 7.647 | v_body_x +0.08 | |g| 0.041:  47%|▉ | 14/30 [00:21<00:21,  1.32s/it]Iter   14 | loss 7.647 | v_body_x +0.08 | |g| 0.041:  50%|█ | 15/30 [00:21<00:19,  1.33s/it]Iter   15 | loss 7.315 | v_body_x +0.05 | |g| 0.044:  50%|█ | 15/30 [00:22<00:19,  1.33s/it]Iter   15 | loss 7.315 | v_body_x +0.05 | |g| 0.044:  53%|█ | 16/30 [00:22<00:18,  1.33s/it]Iter   16 | loss 7.277 | v_body_x +0.05 | |g| 0.051:  53%|█ | 16/30 [00:23<00:18,  1.33s/it]Iter   16 | loss 7.277 | v_body_x +0.05 | |g| 0.051:  57%|█▏| 17/30 [00:23<00:17,  1.31s/it]Iter   17 | loss 7.336 | v_body_x +0.05 | |g| 0.053:  57%|█▏| 17/30 [00:25<00:17,  1.31s/it]Iter   17 | loss 7.336 | v_body_x +0.05 | |g| 0.053:  60%|█▏| 18/30 [00:25<00:15,  1.31s/it]Iter   18 | loss 7.497 | v_body_x +0.05 | |g| 0.056:  60%|█▏| 18/30 [00:26<00:15,  1.31s/it]Iter   18 | loss 7.497 | v_body_x +0.05 | |g| 0.056:  63%|█▎| 19/30 [00:26<00:14,  1.30s/it]Iter   19 | loss 7.316 | v_body_x +0.04 | |g| 0.051:  63%|█▎| 19/30 [00:27<00:14,  1.30s/it]Iter   19 | loss 7.316 | v_body_x +0.04 | |g| 0.051:  67%|█▎| 20/30 [00:27<00:12,  1.29s/it]Iter   20 | loss 7.335 | v_body_x +0.04 | |g| 0.043:  67%|█▎| 20/30 [00:28<00:12,  1.29s/it]Iter   20 | loss 7.335 | v_body_x +0.04 | |g| 0.043:  70%|█▍| 21/30 [00:28<00:11,  1.29s/it]Iter   21 | loss 7.283 | v_body_x +0.04 | |g| 0.036:  70%|█▍| 21/30 [00:30<00:11,  1.29s/it]Iter   21 | loss 7.283 | v_body_x +0.04 | |g| 0.036:  73%|█▍| 22/30 [00:30<00:10,  1.29s/it]Iter   22 | loss 7.363 | v_body_x +0.05 | |g| 0.049:  73%|█▍| 22/30 [00:31<00:10,  1.29s/it]Iter   22 | loss 7.363 | v_body_x +0.05 | |g| 0.049:  77%|█▌| 23/30 [00:31<00:08,  1.29s/it]Iter   23 | loss 7.186 | v_body_x +0.04 | |g| 0.055:  77%|█▌| 23/30 [00:32<00:08,  1.29s/it]Iter   23 | loss 7.186 | v_body_x +0.04 | |g| 0.055:  80%|█▌| 24/30 [00:32<00:07,  1.28s/it]Iter   24 | loss 7.237 | v_body_x +0.05 | |g| 0.050:  80%|█▌| 24/30 [00:33<00:07,  1.28s/it]Iter   24 | loss 7.237 | v_body_x +0.05 | |g| 0.050:  83%|█▋| 25/30 [00:33<00:06,  1.28s/it]Iter   25 | loss 7.422 | v_body_x +0.06 | |g| 0.040:  83%|█▋| 25/30 [00:35<00:06,  1.28s/it]Iter   25 | loss 7.422 | v_body_x +0.06 | |g| 0.040:  87%|█▋| 26/30 [00:35<00:05,  1.28s/it]Iter   26 | loss 7.635 | v_body_x +0.07 | |g| 0.040:  87%|█▋| 26/30 [00:36<00:05,  1.28s/it]Iter   26 | loss 7.635 | v_body_x +0.07 | |g| 0.040:  90%|█▊| 27/30 [00:36<00:03,  1.29s/it]Iter   27 | loss 7.776 | v_body_x +0.07 | |g| 0.063:  90%|█▊| 27/30 [00:37<00:03,  1.29s/it]Iter   27 | loss 7.776 | v_body_x +0.07 | |g| 0.063:  93%|█▊| 28/30 [00:37<00:02,  1.29s/it][DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.114,-0.015) v_b=(+0.115,+0.001)
+[Iter 0] vx_body per env: [ 0.092  0.061  0.005 ... -0.007 -0.002 -0.005]
+
+[DIRECTION CHECK] Iter 0: Real_v_body_x=+0.115, Target_v_star=-0.099
+                  World_v_x=-0.114
+
+[Debug Iter 0] Gradient Norms:
+  net.0.weight: 0.00326105
+  net.0.bias: 0.00031043
+  net.2.weight: 0.00800756
+  net.2.bias: 0.00069723
+  net.4.weight: 0.02511718
+  net.4.bias: 0.00542114
+[Iter 1] vx_body per env: [ 0.068  0.073 -0.019 ...  0.019  0.031  0.024]
+
+[Debug Iter 1] Gradient Norms:
+  net.0.weight: 0.00402176
+  net.0.bias: 0.00038840
+  net.2.weight: 0.00916418
+  net.2.bias: 0.00079873
+  net.4.weight: 0.03000106
+  net.4.bias: 0.00628218
+[Iter 2] vx_body per env: [-0.012  0.083 -0.09  ...  0.024  0.033  0.028]
+
+[Debug Iter 2] Gradient Norms:
+  net.0.weight: 0.00502833
+  net.0.bias: 0.00048376
+  net.2.weight: 0.01072342
+  net.2.bias: 0.00091311
+  net.4.weight: 0.03705403
+  net.4.bias: 0.00683420
+[Iter 3] vx_body per env: [-0.118  0.036 -0.154 ... -0.    -0.    -0.   ]
+
+[Debug Iter 3] Gradient Norms:
+  net.0.weight: 0.00579692
+  net.0.bias: 0.00054737
+  net.2.weight: 0.01128969
+  net.2.bias: 0.00090854
+  net.4.weight: 0.03782203
+  net.4.bias: 0.00576249
+[Iter 4] vx_body per env: [-0.232 -0.028 -0.236 ...  0.037  0.037  0.037]
+
+[Debug Iter 4] Gradient Norms:
+  net.0.weight: 0.00856868
+  net.0.bias: 0.00079282
+  net.2.weight: 0.01523050
+  net.2.bias: 0.00116532
+  net.4.weight: 0.05244070
+  net.4.bias: 0.00673844
+[Iter 5] vx_body per env: [-0.351 -0.05  -0.333 ...  0.097  0.097  0.097]
+
+[Debug Iter 5] Gradient Norms:
+  net.0.weight: 0.01012945
+  net.0.bias: 0.00087639
+  net.2.weight: 0.01652903
+  net.2.bias: 0.00113197
+  net.4.weight: 0.05760576
+  net.4.bias: 0.00599881
+[Iter 6] vx_body per env: [-0.469 -0.039 -0.437 ...  0.087  0.086  0.085]
+
+[Debug Iter 6] Gradient Norms:
+  net.0.weight: 0.00764628
+  net.0.bias: 0.00043577
+  net.2.weight: 0.01101739
+  net.2.bias: 0.00045838
+  net.4.weight: 0.03643061
+  net.4.bias: 0.00271271
+[Iter 7] vx_body per env: [-0.562 -0.065 -0.517 ... -0.008 -0.007 -0.008]
+
+[Debug Iter 7] Gradient Norms:
+  net.0.weight: 0.01356937
+  net.0.bias: 0.00118998
+  net.2.weight: 0.01536070
+  net.2.bias: 0.00129385
+  net.4.weight: 0.04014798
+  net.4.bias: 0.00480169
+[DBG_DIR t=00200] pos_w=(+12.655,+4.882) v_w=(+0.591,+0.123) v_b=(-0.602,-0.035)
+[Iter 8] vx_body per env: [-0.599 -0.149 -0.549 ...  0.095  0.092  0.097]
+
+[Debug Iter 8] Gradient Norms:
+  net.0.weight: 0.02228529
+  net.0.bias: 0.00218602
+  net.2.weight: 0.02545728
+  net.2.bias: 0.00229960
+  net.4.weight: 0.07460171
+  net.4.bias: 0.00812654
+[Iter 9] vx_body per env: [-0.568 -0.233 -0.511 ...  0.221  0.216  0.226]
+
+[Debug Iter 9] Gradient Norms:
+  net.0.weight: 0.02495726
+  net.0.bias: 0.00251416
+  net.2.weight: 0.02899482
+  net.2.bias: 0.00262476
+  net.4.weight: 0.08870144
+  net.4.bias: 0.00923982
+[Iter 10] vx_body per env: [-0.496 -0.24  -0.266 ...  0.199  0.196  0.204]
+
+[Debug Iter 10] Gradient Norms:
+  net.0.weight: 0.02347137
+  net.0.bias: 0.00238865
+  net.2.weight: 0.02809953
+  net.2.bias: 0.00254126
+  net.4.weight: 0.08725117
+  net.4.bias: 0.00913429
+[Iter 11] vx_body per env: [-0.412 -0.174 -0.005 ... -0.01  -0.011 -0.011]
+
+[Debug Iter 11] Gradient Norms:
+  net.0.weight: 0.02105243
+  net.0.bias: 0.00214154
+  net.2.weight: 0.02597353
+  net.2.bias: 0.00236692
+  net.4.weight: 0.07749669
+  net.4.bias: 0.00863937
+[Iter 12] vx_body per env: [-0.316 -0.056  0.092 ...  0.074  0.077  0.08 ]
+
+[Debug Iter 12] Gradient Norms:
+  net.0.weight: 0.01319186
+  net.0.bias: 0.00133413
+  net.2.weight: 0.01695593
+  net.2.bias: 0.00154225
+  net.4.weight: 0.05149655
+  net.4.bias: 0.00595714
+[Iter 13] vx_body per env: [-0.203  0.089  0.048 ...  0.166  0.175  0.183]
+
+[Debug Iter 13] Gradient Norms:
+  net.0.weight: 0.00664998
+  net.0.bias: 0.00061871
+  net.2.weight: 0.00931378
+  net.2.bias: 0.00076609
+  net.4.weight: 0.03204395
+  net.4.bias: 0.00323303
+[Iter 14] vx_body per env: [-0.063  0.246 -0.193 ...  0.15   0.163  0.172]
+
+[Debug Iter 14] Gradient Norms:
+  net.0.weight: 0.00935864
+  net.0.bias: 0.00086438
+  net.2.weight: 0.01247714
+  net.2.bias: 0.00098619
+  net.4.weight: 0.03776339
+  net.4.bias: 0.00348225
+[Iter 15] vx_body per env: [ 0.08   0.401 -0.157 ... -0.001 -0.002 -0.002]
+
+[Debug Iter 15] Gradient Norms:
+  net.0.weight: 0.01073899
+  net.0.bias: 0.00099936
+  net.2.weight: 0.01407018
+  net.2.bias: 0.00115047
+  net.4.weight: 0.03994996
+  net.4.bias: 0.00429378
+[DBG_DIR t=00400] pos_w=(+12.778,+4.905) v_w=(-0.039,-0.064) v_b=(+0.219,+0.077)
+[Iter 16] vx_body per env: [ 0.198  0.506 -0.041 ...  0.014  0.019  0.018]
+
+[Debug Iter 16] Gradient Norms:
+  net.0.weight: 0.01489344
+  net.0.bias: 0.00143703
+  net.2.weight: 0.01823227
+  net.2.bias: 0.00156323
+  net.4.weight: 0.04484504
+  net.4.bias: 0.00503705
+[Iter 17] vx_body per env: [0.274 0.533 0.064 ... 0.033 0.049 0.046]
+
+[Debug Iter 17] Gradient Norms:
+  net.0.weight: 0.01705243
+  net.0.bias: 0.00165706
+  net.2.weight: 0.01996367
+  net.2.bias: 0.00173443
+  net.4.weight: 0.04521727
+  net.4.bias: 0.00515819
+[Iter 18] vx_body per env: [0.298 0.483 0.168 ... 0.034 0.06  0.052]
+
+[Debug Iter 18] Gradient Norms:
+  net.0.weight: 0.01819338
+  net.0.bias: 0.00177058
+  net.2.weight: 0.02047265
+  net.2.bias: 0.00178524
+  net.4.weight: 0.04803559
+  net.4.bias: 0.00570519
+[Iter 19] vx_body per env: [ 0.269  0.387  0.226 ... -0.002 -0.001  0.002]
+
+[Debug Iter 19] Gradient Norms:
+  net.0.weight: 0.01797280
+  net.0.bias: 0.00173348
+  net.2.weight: 0.01886193
+  net.2.bias: 0.00163320
+  net.4.weight: 0.04330537
+  net.4.bias: 0.00494611
+[Iter 20] vx_body per env: [ 0.2    0.295  0.235 ...  0.003  0.002 -0.003]
+
+[DIRECTION CHECK] Iter 20: Real_v_body_x=+0.238, Target_v_star=-0.099
+                  World_v_x=-0.119
+
+[Debug Iter 20] Gradient Norms:
+  net.0.weight: 0.01500374
+  net.0.bias: 0.00139665
+  net.2.weight: 0.01477319
+  net.2.bias: 0.00119013
+  net.4.weight: 0.03743137
+  net.4.bias: 0.00355680
+[Iter 21] vx_body per env: [0.115 0.059 0.203 ... 0.031 0.028 0.002]
+
+[Debug Iter 21] Gradient Norms:
+  net.0.weight: 0.01401648
+  net.0.bias: 0.00127196
+  net.2.weight: 0.01256521
+  net.2.bias: 0.00097171
+  net.4.weight: 0.03081266
+  net.4.bias: 0.00231459
+[Iter 22] vx_body per env: [0.047 0.018 0.136 ... 0.085 0.077 0.036]
+
+[Debug Iter 22] Gradient Norms:
+  net.0.weight: 0.01925444
+  net.0.bias: 0.00182743
+  net.2.weight: 0.01727048
+  net.2.bias: 0.00149987
+  net.4.weight: 0.04117551
+  net.4.bias: 0.00491773
+[Iter 23] vx_body per env: [ 0.024  0.038  0.056 ...  0.008  0.003 -0.002]
+
+[Debug Iter 23] Gradient Norms:
+  net.0.weight: 0.02245822
+  net.0.bias: 0.00215791
+  net.2.weight: 0.01934294
+  net.2.bias: 0.00172117
+  net.4.weight: 0.04575371
+  net.4.bias: 0.00580360
+[Iter 24] vx_body per env: [ 0.06   0.008 -0.023 ...  0.005  0.009  0.01 ]
+
+[Debug Iter 24] Gradient Norms:
+  net.0.weight: 0.02055932
+  net.0.bias: 0.00194177
+  net.2.weight: 0.01654473
+  net.2.bias: 0.00142144
+  net.4.weight: 0.04227977
+  net.4.bias: 0.00492613
+[DBG_DIR t=00600] pos_w=(+12.728,+4.865) v_w=(-0.230,-0.051) v_b=(+0.101,-0.000)
+[Iter 25] vx_body per env: [ 0.157 -0.024 -0.085 ...  0.004  0.049  0.065]
+
+[Debug Iter 25] Gradient Norms:
+  net.0.weight: 0.01535089
+  net.0.bias: 0.00136097
+  net.2.weight: 0.01095405
+  net.2.bias: 0.00075920
+  net.4.weight: 0.03494387
+  net.4.bias: 0.00292613
+[STRIDE env0 t=00633] FL stride_xy=0.031  fwd=0.013  lat=0.028 | v_body=(+0.28,+0.00) f=1.600 v/f≈0.176 | yaw=-2.86 wz=+0.14 | cmd=[-0.099  0.427  0.318]
+[Iter 26] vx_body per env: [ 0.308 -0.045 -0.115 ... -0.     0.088  0.123]
+
+[Debug Iter 26] Gradient Norms:
+  net.0.weight: 0.01712488
+  net.0.bias: 0.00157250
+  net.2.weight: 0.01165223
+  net.2.bias: 0.00086242
+  net.4.weight: 0.03430054
+  net.4.bias: 0.00256019
+[Iter 27] vx_body per env: [ 0.397 -0.039 -0.12  ...  0.006  0.015  0.029]
+
+[Debug Iter 27] Gradient Norms:
+  net.0.weight: 0.03140305
+  net.0.bias: 0.00310468
+  net.2.weight: 0.02205674
+  net.2.bias: 0.00200716
+  net.4.weight: 0.04897078
+  net.4.bias: 0.00537069
+[Iter 28] vx_body per env: [ 0.452 -0.053 -0.115 ... -0.007  0.002 -0.002]
+
+[Debug Iter 28] Gradient Norms:
+  net.0.weight: 0.02402553
+Iter   28 | loss 7.681 | v_body_x +0.05 | |g| 0.052:  93%|█▊| 28/30 [00:39<00:02,  1.29s/it]Iter   28 | loss 7.681 | v_body_x +0.05 | |g| 0.052:  97%|█▉| 29/30 [00:39<00:01,  1.29s/it]Iter   29 | loss 7.807 | v_body_x +0.05 | |g| 0.046:  97%|█▉| 29/30 [00:40<00:01,  1.29s/it]Iter   29 | loss 7.807 | v_body_x +0.05 | |g| 0.046: 100%|██| 30/30 [00:40<00:00,  1.29s/it]Iter   29 | loss 7.807 | v_body_x +0.05 | |g| 0.046: 100%|██| 30/30 [00:40<00:00,  1.35s/it]
+  net.0.bias: 0.00229869
+  net.2.weight: 0.01596583
+  net.2.bias: 0.00134514
+  net.4.weight: 0.04324921
+  net.4.bias: 0.00404097
+[Iter 29] vx_body per env: [ 0.482 -0.095 -0.109 ... -0.041  0.064  0.023]
+
+[Debug Iter 29] Gradient Norms:
+  net.0.weight: 0.01757589
+  net.0.bias: 0.00158088
+  net.2.weight: 0.01190309
+  net.2.bias: 0.00088700
+  net.4.weight: 0.04022960
+  net.4.bias: 0.00359792
+[train] Saved TorchScript: results/smoke/hloss/quad_diffsim_srbd_align_multi_robot.pt
+[train] final curriculum: mean level 0.33 (max 5), histogram over rows [1727, 134, 54, 101, 24, 8, 0, 0, 0, 0]
+[train]   discrete obstacles   n=  409  mean level 0.00
+[train]   rough slope          n=  205  mean level 0.65
+[train]   smooth slope         n=  205  mean level 0.86
+[train]   stairs down          n=  717  mean level 0.00
+[train]   stairs up            n=  512  mean level 0.72
+[bench] results/smoke/hloss: 0.779 it/s median over 10 timed iters, peak 162 MB
+[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).

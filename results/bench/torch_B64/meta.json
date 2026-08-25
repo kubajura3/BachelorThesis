@@ -1,0 +1,23 @@
+{
+  "mode": "blind",
+  "seed": 0,
+  "num_envs": 64,
+  "iters": 100,
+  "steps_per_iter": 24,
+  "srbd_backend": "torch",
+  "force_dtype": "fp32",
+  "pure_paper_mode": true,
+  "terrain_type": "flat",
+  "dt": 0.002,
+  "sim_seconds_per_iter": 0.048,
+  "device": "cuda",
+  "warmup": 20,
+  "git_commit": "43405b4",
+  "gpu": "NVIDIA GeForce GTX 1660 Ti",
+  "torch": "1.13.1+cu117",
+  "cuda": "11.7",
+  "python": "3.8.20",
+  "host": "jakub-GL65-Leopard-10SDR",
+  "started": "2026-08-24T15:37:31",
+  "finished": "2026-08-24T15:38:24"
+}
