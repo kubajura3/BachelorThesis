@@ -326,6 +326,24 @@ class RealQuadEnv:
         self.feet_local = [leg2body["fl"], leg2body["fr"], leg2body["rl"], leg2body["rr"]]
         print("[INFO] feet_local rigid bodies (FL,FR,RL,RR idx):", self.feet_local)
 
+        # Rudin terrain: resolve the curriculum-grid placement BEFORE the env loop, so each actor
+        # can be *created* on its own cell (terrain_levels = difficulty rows, terrain_types =
+        # terrain-type columns) instead of at the world origin. legged_gym's _create_envs does
+        # exactly this (`start_pose.p = self.env_origins[i]`); this repo created every actor at
+        # (0, 0, h0) and only teleported it onto the grid afterwards through the root-state
+        # tensor. Under the GPU pipeline that is not equivalent: the trimesh only produced
+        # contacts inside a narrow band of world y (CAMPAIGN_FINDINGS section 15 -- at
+        # spacing = 0 columns 15-16 stood at ~100 % contact and every other column sat at
+        # exactly 0, free-falling the full 0.19 m fall-rule budget through phantom ground).
+        # Running it here also lets _sample_spawn_xy cache these origins as the spawn points.
+        rudin = (self.cfg.terrain_type == "rudin" and self.terrain is not None
+                 and getattr(self.terrain, "env_origins", None) is not None)
+        if rudin:
+            self._assign_rudin_origins()
+            spawn_p = self.env_origins.clone()
+            spawn_p[:, 2] += self.cfg.h0
+            spawn_p = spawn_p.cpu().tolist()
+
         # Create env + actor
         pose = gymapi.Transform()
         pose.p = gymapi.Vec3(0, 0, self.cfg.h0)
@@ -333,24 +351,40 @@ class RealQuadEnv:
         pose.r = quat_from_rpy(0.0, 0.0, yaw0)
 
         actor_name = "go2"
+        isaac_origins = []
         for env_id in range(self.B):
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
             self.envs.append(env_ptr)
-            
+
             o = self.gym.get_env_origin(env_ptr)  # gymapi.Vec3
-            self.env_origins[env_id] = torch.tensor([o.x, o.y, o.z], device=self.device)
+            isaac_origins.append((o.x, o.y, o.z))
+            if rudin:
+                # env_origins already holds the curriculum-cell origin. Do NOT overwrite it with
+                # the Isaac env-grid origin, and create the actor standing on its own cell.
+                px, py, pz = spawn_p[env_id]
+                pose.p = gymapi.Vec3(px, py, pz)
+            else:
+                self.env_origins[env_id] = torch.tensor([o.x, o.y, o.z], device=self.device)
 
             actor_handle = self.gym.create_actor(env_ptr, self.robot_asset, pose, actor_name, env_id, 1)
             self.actor_handles.append(actor_handle)
             actor_index = self.gym.get_actor_index(env_ptr, actor_handle, gymapi.DOMAIN_SIM)
             self.actor_indices.append(actor_index)
 
-        # Rudin terrain: override the env-grid origins with the curriculum-grid placement
-        # (terrain_levels = difficulty rows, terrain_types = terrain-type columns). Runs before
-        # the first reset so _sample_spawn_xy caches these origins as the spawn points.
-        if self.cfg.terrain_type == "rudin" and self.terrain is not None \
-                and getattr(self.terrain, "env_origins", None) is not None:
-            self._assign_rudin_origins()
+        # Diagnostic (section 15): what Isaac actually did with the env grid, and where the actors
+        # were *created*. The section 14 fix zeroed `spacing` without ever checking the resulting
+        # env origins, which is why the contact band moved instead of disappearing.
+        ix = [o[0] for o in isaac_origins]
+        iy = [o[1] for o in isaac_origins]
+        print(f"[env] isaac env-grid origins: x [{min(ix):.2f}, {max(ix):.2f}] "
+              f"y [{min(iy):.2f}, {max(iy):.2f}] (spacing={spacing}, num_per_row={num_per_row})",
+              flush=True)
+        if rudin:
+            sx = [q[0] for q in spawn_p]
+            sy = [q[1] for q in spawn_p]
+            sz = [q[2] for q in spawn_p]
+            print(f"[env] rudin actor create poses: x [{min(sx):.2f}, {max(sx):.2f}] "
+                  f"y [{min(sy):.2f}, {max(sy):.2f}] z [{min(sz):.2f}, {max(sz):.2f}]", flush=True)
 
         # int32: Isaac Gym's indexed-tensor APIs require int32 actor indices.
         self.actor_indices_t = torch.as_tensor(self.actor_indices, device=self.device, dtype=torch.int32)
