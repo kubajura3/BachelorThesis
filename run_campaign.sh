@@ -5,6 +5,7 @@
 #   ./run_campaign.sh smoke     5 short runs; this is what picks NUM_ENVS
 #   ./run_campaign.sh exp1     12 speed runs (6 CUDA + 6 PyTorch), flat terrain
 #   ./run_campaign.sh exp2     13 locomotion runs on the Rudin curriculum
+#                              SEEDS=0 ./run_campaign.sh exp2  -> 5 runs, one per mode
 #   ./run_campaign.sh all      exp1 then exp2
 #
 # Runs are sequential on purpose: one GPU, and two training processes would
@@ -24,6 +25,7 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 BSTAR="${BSTAR:-1024}"          # parallel robots for exp2; set from the smoke runs
 ITERS="${ITERS:-5000}"          # training iterations for exp2
+SEEDS="${SEEDS:-0 1 2}"         # seeds per mode for exp2; SEEDS=0 gives one run per mode
 BENCH_ITERS="${BENCH_ITERS:-100}"
 SMOKE_ITERS="${SMOKE_ITERS:-30}"
 SMOKE_ENVS="${SMOKE_ENVS:-2048}"   # start here; drop to 1024 if depth OOMs
@@ -65,12 +67,18 @@ build_exp1() {
 
 build_exp2() {
   for mode in blind_rudin hobs hloss height; do
-    for seed in 0 1 2; do
+    for seed in $SEEDS; do
       add_run "train/${mode}_s${seed}" \
         "MODE=$mode SEED=$seed ITERS=$ITERS NUM_ENVS=$BSTAR"
     done
   done
-  add_run "train/depth_s0" "MODE=depth SEED=0 ITERS=$ITERS NUM_ENVS=$BSTAR"
+  # depth is the slowest run, so it only ever gets seed 0 -- and only when 0
+  # is in SEEDS, so `SEEDS="1 2"` adds seeds without redoing it.
+  for seed in $SEEDS; do
+    if [[ "$seed" == "0" ]]; then
+      add_run "train/depth_s0" "MODE=depth SEED=0 ITERS=$ITERS NUM_ENVS=$BSTAR"
+    fi
+  done
 }
 
 case "${1:-}" in
@@ -92,7 +100,7 @@ stamp() { date "+%Y-%m-%d %H:%M:%S"; }
 trap 'echo; echo "[$(stamp)] interrupted -- stopping the queue"; exit 130' INT TERM
 
 echo "[$(stamp)] campaign '${1}': $total runs, results under $RESULTS/"
-echo "[$(stamp)] BSTAR=$BSTAR ITERS=$ITERS BENCH_ITERS=$BENCH_ITERS"
+echo "[$(stamp)] BSTAR=$BSTAR ITERS=$ITERS SEEDS=\"$SEEDS\" BENCH_ITERS=$BENCH_ITERS"
 echo
 
 for i in "${!QUEUE_NAME[@]}"; do
