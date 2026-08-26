@@ -193,8 +193,15 @@ class RealQuadEnv:
             self.height_samples = None
 
 
-        # Create multiple envs, one go2 per env
-        spacing = 2.0
+        # Create multiple envs, one go2 per env.
+        # Shared-terrain modes place robots in world coordinates (_assign_rudin_origins ->
+        # _write_spawn_pose), so they must not also sit inside a per-env spatial grid: with
+        # spacing > 0 the envs span a bounded box that does not cover the curriculum grid,
+        # and the trimesh stops generating contacts past its edge (see CAMPAIGN_FINDINGS
+        # section 14 -- collision died past y ~ 48 m, 90% of robots never touched the ground).
+        # legged_gym's _create_envs uses env_lower = env_upper = 0 for exactly this reason.
+        # Flat keeps 2.0 so the Experiment 1 bench numbers stay bit-identical.
+        spacing = 0.0 if self.cfg.terrain_type == "rudin" else 2.0
         lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         upper = gymapi.Vec3(spacing, spacing, spacing)
         num_per_row = int(math.ceil(math.sqrt(self.B)))
