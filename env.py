@@ -161,7 +161,7 @@ class RealQuadEnv:
         sim_params.up_axis = gymapi.UP_AXIS_Z
         sim_params.gravity = gymapi.Vec3(0.0, 0.0, -self.cfg.g)
         sim_params.use_gpu_pipeline = self.cfg.use_gpu_pipeline
-        _setup_physx_stable(sim_params, use_gpu=True)
+        _setup_physx_stable(sim_params, use_gpu=True, terrain_type=self.cfg.terrain_type)
 
         print("[env] creating PhysX simulation", flush=True)
         self.sim = self.gym.create_sim(0, 0, gymapi.SIM_PHYSX, sim_params)

@@ -97,11 +97,15 @@ class TerrainData:
     triangles: object = None
 
 
-def _setup_physx_stable(sim_params, use_gpu=True):
+def _setup_physx_stable(sim_params, use_gpu=True, terrain_type="flat"):
     """Apply conservative PhysX solver settings for stable quadruped contact.
 
     Every assignment is guarded with ``hasattr`` so the function works across
     Isaac Gym preview versions that expose different parameter sets.
+
+    ``terrain_type == "rudin"`` additionally raises the GPU broadphase buffers
+    (see the Rudin-only block at the end); flat/rough keep the original values so
+    the Experiment 1 bench numbers stay bit-identical.
     """
     if hasattr(sim_params, "substeps"):
         sim_params.substeps = 3
@@ -136,6 +140,28 @@ def _setup_physx_stable(sim_params, use_gpu=True):
         ph.enable_stabilization = True
     if hasattr(ph, "enable_ccd"):
         ph.enable_ccd = True
+
+    # --- Rudin only: GPU broadphase buffers -------------------------------------------------
+    # With the curriculum grid the 2048 robots are spread over a 80 x 160 m trimesh, and PhysX
+    # reports at the end of the run:
+    #   "The application needs to increase PxgDynamicsMemoryConfig::foundLostAggregatePairsCapacity
+    #    to 1383623, otherwise the simulation will miss interactions"
+    # "Miss interactions" means dropped contact pairs, i.e. robots that fall through the mesh --
+    # 228 of 2048 in the section 15.5 run, all of them in columns 10-19. legged_gym runs the same
+    # grid with default_buffer_size_multiplier = 5 and max_gpu_contact_pairs = 2**23; this repo
+    # had 2.0 and never set the contact-pair cap at all. Gated on the terrain type so the flat
+    # bench (sections 7 / 9.1) keeps its exact solver configuration.
+    if terrain_type == "rudin":
+        if hasattr(ph, "default_buffer_size_multiplier"):
+            ph.default_buffer_size_multiplier = 5.0
+        if hasattr(ph, "max_gpu_contact_pairs"):
+            ph.max_gpu_contact_pairs = 2 ** 23
+        print(
+            "[physx] rudin buffers: default_buffer_size_multiplier="
+            f"{getattr(ph, 'default_buffer_size_multiplier', None)} "
+            f"max_gpu_contact_pairs={getattr(ph, 'max_gpu_contact_pairs', None)}",
+            flush=True,
+        )
 
 
 # ================== Terrain Creation Tools ==================
