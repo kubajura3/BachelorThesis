@@ -44,6 +44,19 @@ DBG_INIT_FALL_STEPS = 250     # Only print first N env.step() calls (t starts fr
 DBG_INIT_FALL_EVERY = 5       # Print every N steps
 DBG_INIT_FALL_ENV = 0         # Only watch which robot (env index)
 
+# ===============================
+# Fall-rule diagnostic overrides  (env vars: FALL_H_THRESH=<m>, DIAG_NO_TERM=1)
+# ===============================
+FALL_H_THRESH = float(os.getenv("FALL_H_THRESH", "0.16"))
+DIAG_NO_TERM = _flag("DIAG_NO_TERM", False)
+# Unset -> exactly the literals that used to be hard-coded in env.step(), so a plain
+# run is unchanged. They exist for one diagnostic: on Rudin terrain the base height
+# falls 0.35 -> 0.16 in ~0.19 s (within 3% of free fall) and the robot is terminated
+# before it ever lands, so we never see the height it would have settled at -- and that
+# height is what separates "spawned above the collision mesh" from "legs collapsing".
+# DIAG_NO_TERM=1 disables BOTH halves of the rule (height and tilt) so the run keeps
+# falling and the answer becomes readable. Never set either for a real training run.
+
 # Whether to only reset at iter=0
 ONLY_ITERATE_NO_RESET = True
 # True: no reset
@@ -223,6 +236,10 @@ class EnvCfg:
 
     # termination
     term_penalty: float = 200.0
+    # Fall rule, previously hard-coded in env.step(). Same values, now in one place so a
+    # diagnostic run can move them from the environment (see FALL_H_THRESH / DIAG_NO_TERM).
+    fall_height_thresh: float = FALL_H_THRESH   # [m] base height above the ground beneath it
+    fall_tilt_thresh: float = 0.9               # [rad] |roll| or |pitch|
 
     # Episode length (seconds of sim time). Only used by the Rudin dynamic curriculum: a robot that
     # neither falls nor finishes the episode is reset after this long, which is what lets the

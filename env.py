@@ -34,6 +34,7 @@ from config import (
     DBG_INIT_FALL_EVERY,
     DBG_INIT_FALL_STEPS,
     DEBUG_TRAIN,
+    DIAG_NO_TERM,
     PURE_PAPER_MODE,
     EnvCfg,
 )
@@ -1357,6 +1358,14 @@ class RealQuadEnv:
         with torch.no_grad():
             p_foot = self.foot_positions()              # (B,4,3)
             c = self.contact_flags().squeeze(-1)        # (B,4)
+
+            # Diagnostic (see the `extra` dict below): how far the lowest foot sits above the
+            # surface _terrain_height claims is underneath it. Computed here because p_foot is
+            # already in hand and the block is already under no_grad; the lookup is a clamp and
+            # a gather over 4B rows, and returns zeros on a flat plane.
+            terr_foot = self._terrain_height(p_foot[:, :, 0:2].reshape(-1, 2)).view(-1, 4)
+            foot_clear_min = (p_foot[:, :, 2] - terr_foot).min(dim=1).values   # (B,)
+
             prev_c = getattr(self, "prev_contact_flags", None)
             if prev_c is None:
                 self.prev_contact_flags = c.unsqueeze(-1).clone()
@@ -1527,9 +1536,19 @@ class RealQuadEnv:
         # Same lookup that decides the spawn height, so the two agree by construction, and it
         # returns zeros on a flat plane, leaving flat-ground behaviour bit-for-bit unchanged.
         base_h = self.base_pos[:, 2] - self._terrain_height(self.base_pos[:, :2])
-        fallen_height = (base_h < 0.16)                        # (B,)
-        fallen_tilt   = (torch.abs(self.roll) > 0.9) | (torch.abs(self.pitch) > 0.9)
-        done = fallen_height | fallen_tilt                     # (B,)
+        fallen_height = (base_h < self.cfg.fall_height_thresh)  # (B,)
+        fallen_tilt   = ((torch.abs(self.roll) > self.cfg.fall_tilt_thresh)
+                         | (torch.abs(self.pitch) > self.cfg.fall_tilt_thresh))
+        if DIAG_NO_TERM:
+            # Diagnostic runs only: let the robots keep falling so the height they eventually
+            # settle at becomes visible. Both halves are zeroed rather than just the height one,
+            # because a robot dropping past its own feet tumbles and the tilt half would fire
+            # first, cutting the run short for the same reason. The two flags below still carry
+            # the un-suppressed values, so `n_fall_height` / `n_fall_tilt` keep telling the truth
+            # about what *would* have terminated -- only `done` is silenced.
+            done = torch.zeros(self.B, dtype=torch.bool, device=self.device)
+        else:
+            done = fallen_height | fallen_tilt                 # (B,)
 
         # Episode timeout (Rudin dynamic curriculum only). Robots that neither fell nor finished are
         # reset after max_episode_length steps so the curriculum can promote them. Kept all-False for
@@ -1551,6 +1570,21 @@ class RealQuadEnv:
             "fall_height": fallen_height,                  # (B,) bool
             "fall_tilt": fallen_tilt,                      # (B,) bool
             "base_h": base_h.detach(),                     # (B,) metres above the ground beneath
+            # Is the robot actually standing on anything? `base_h` alone cannot say: a body
+            # sinking onto planted feet and a body falling through empty air produce the same
+            # curve. p_foot and c are the tensors the last_contact_z block above already
+            # computed under no_grad, so reusing them costs one terrain lookup and nothing else.
+            #   n_contact      -- feet in contact. Healthy trot ~2; airborne 0.
+            #   base_z         -- raw world height. With base_h logged too, the terrain reading
+            #                     under each robot is recoverable as base_z - base_h, which is
+            #                     what separates a falling body from a rising ground reading.
+            #   foot_clear_min -- lowest foot above the surface _terrain_height claims is there.
+            #                     ~0.02 m (foot radius) when grounded. A persistent large
+            #                     positive value alongside n_contact == 0 means the collision
+            #                     mesh sits that far below the lookup.
+            "n_contact": c.sum(dim=1),                     # (B,) float, 0..4
+            "base_z": self.base_pos[:, 2].detach(),        # (B,) world metres
+            "foot_clear_min": foot_clear_min,              # (B,) metres above the looked-up surface
             "muN": torch.ones(self.B, device=self.device),
             "q_err_norm": torch.zeros(self.B, device=self.device),
         }

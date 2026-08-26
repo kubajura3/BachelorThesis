@@ -78,7 +78,7 @@ MODE_CFG = {
 }
 
 
-def save_curriculum_snapshot(env, cfg, out):
+def save_curriculum_snapshot(env, cfg, out, mean_contacts=None, min_foot_clear=None):
     """Write where every robot ended up on the curriculum grid.
 
     The per-iteration ``terrain_level`` curve gives the mean over robots; this is
@@ -87,6 +87,13 @@ def save_curriculum_snapshot(env, cfg, out):
 
     Writes ``final_state.npz`` (per-robot arrays) and ``final_state.json``
     (histogram over difficulty rows, per-terrain-family means, distance walked).
+
+    Args:
+        mean_contacts: optional (B,) per-robot mean feet in contact over the run.
+        min_foot_clear: optional (B,) per-robot minimum lowest-foot clearance above
+            the looked-up terrain surface. Both are folded into the per-family means
+            so "airborne on stairs but grounded on slopes" is separable from
+            "airborne everywhere" -- different bugs with the same batch mean.
     """
     levels = env.terrain_levels.detach().cpu().numpy().astype(np.int64)
     types = env.terrain_types.detach().cpu().numpy().astype(np.int64)
@@ -95,6 +102,10 @@ def save_curriculum_snapshot(env, cfg, out):
     # not a per-episode average -- useful as a spread, not as a headline metric.
     dist = torch.norm(env.base_pos[:, 0:2] - env.env_origins[:, 0:2], dim=1)
     dist = dist.detach().cpu().numpy()
+    contacts = (mean_contacts.detach().cpu().numpy()
+                if mean_contacts is not None else None)
+    clear = (min_foot_clear.detach().cpu().numpy()
+             if min_foot_clear is not None else None)
 
     num_rows = int(cfg.rudin_terrain.num_rows)
     num_cols = int(cfg.rudin_terrain.num_cols)
@@ -113,9 +124,18 @@ def save_curriculum_snapshot(env, cfg, out):
             "max_terrain_level": int(levels[mask].max()),
             "mean_distance_m": float(dist[mask].mean()),
         }
+        if contacts is not None:
+            by_family[name]["mean_n_contact"] = float(contacts[mask].mean())
+        if clear is not None:
+            by_family[name]["min_foot_clear_m"] = float(clear[mask].min())
+            by_family[name]["mean_min_foot_clear_m"] = float(clear[mask].mean())
 
-    np.savez(out("final_state.npz"), terrain_level=levels, terrain_type=types,
-             distance_from_origin=dist)
+    arrays = dict(terrain_level=levels, terrain_type=types, distance_from_origin=dist)
+    if contacts is not None:
+        arrays["mean_n_contact"] = contacts
+    if clear is not None:
+        arrays["min_foot_clear"] = clear
+    np.savez(out("final_state.npz"), **arrays)
     summary = {
         "num_robots": int(levels.size),
         "num_rows": num_rows,
@@ -133,8 +153,12 @@ def save_curriculum_snapshot(env, cfg, out):
     print(f"[train] final curriculum: mean level {summary['mean_terrain_level']:.2f} "
           f"(max {summary['max_terrain_level']}), histogram over rows {hist}")
     for name, stats in by_family.items():
-        print(f"[train]   {name:20s} n={stats['n_robots']:5d}  "
-              f"mean level {stats['mean_terrain_level']:.2f}")
+        line = (f"[train]   {name:20s} n={stats['n_robots']:5d}  "
+                f"mean level {stats['mean_terrain_level']:.2f}")
+        if "mean_n_contact" in stats:
+            line += (f"  contacts {stats['mean_n_contact']:.2f}"
+                     f"  minFootClear {stats['min_foot_clear_m']:+.3f} m")
+        print(line)
 
 
 def train(num_iters=1000, steps_per_iter=24,
@@ -261,6 +285,14 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_clear_hist_iter = []
     terrain_level_iter = []
 
+    # Per-robot ground-contact diagnostics, accumulated across the whole run and dumped by
+    # save_curriculum_snapshot(). The per-iteration columns give the batch mean; these give the
+    # distribution behind it, which is what lets the snapshot split contacts by terrain family --
+    # "airborne on stairs, grounded on slopes" and "airborne everywhere" are different bugs and
+    # the mean cannot tell them apart.
+    contact_sum_env = torch.zeros(B, device=device)     # summed feet-in-contact per robot
+    foot_clear_min_env = None                           # running min of foot clearance per robot
+
     # Outer loop
     for it in pbar:
         bench.start()
@@ -305,6 +337,13 @@ def train(num_iters=1000, steps_per_iter=24,
         n_fall_t_iter = 0        # falls where the tilt half fired (both can fire at once)
         base_h_sum = 0.0         # sum over steps of the batch-mean base height
         base_h_min = None        # running min over steps x batch, kept on device
+        # Ground-contact diagnostics. base_h cannot distinguish a body sinking onto planted feet
+        # from a body falling through empty air; these can. Same accumulate-on-device discipline
+        # as the counters above -- one float() per iteration, none inside the step loop.
+        n_contact_sum = 0.0      # sum over steps of the batch-mean feet in contact
+        base_z_sum = 0.0         # sum over steps of the batch-mean raw world height
+        foot_clear_sum = 0.0     # sum over steps of the batch-mean lowest-foot clearance
+        foot_clear_min = None    # running min over steps x batch
 
         a_prev = torch.zeros(B, 12, device=device)
 
@@ -465,6 +504,22 @@ def train(num_iters=1000, steps_per_iter=24,
             bh = extra["base_h"]
             base_h_sum = base_h_sum + bh.mean()
             base_h_min = bh.min() if base_h_min is None else torch.minimum(base_h_min, bh.min())
+            # Same sampling rule as base_h above: every step, before reset_envs, so the state
+            # measured is the one that triggered the fall rather than the fresh respawn.
+            nc = extra["n_contact"]
+            fc = extra["foot_clear_min"]
+            n_contact_sum = n_contact_sum + nc.mean()
+            base_z_sum = base_z_sum + extra["base_z"].mean()
+            foot_clear_sum = foot_clear_sum + fc.mean()
+            foot_clear_min = fc.min() if foot_clear_min is None else torch.minimum(foot_clear_min, fc.min())
+            # Per-robot, across the whole run (see the declarations above the outer loop).
+            # In-place: nc and fc carry no grad, and this runs 24x per iteration for the whole
+            # run, so there is no reason to allocate a fresh (B,) tensor every step.
+            contact_sum_env += nc
+            if foot_clear_min_env is None:
+                foot_clear_min_env = fc.clone()
+            else:
+                torch.minimum(foot_clear_min_env, fc, out=foot_clear_min_env)
             # Episode timeout (Rudin dynamic curriculum); all-False on flat/rough so behaviour there
             # is unchanged (reset set == falls). Falls AND timeouts both reset, but only falls are
             # penalised — Rudin gives no terminal reward for time-outs.
@@ -696,7 +751,11 @@ def train(num_iters=1000, steps_per_iter=24,
                    n_move_up=n_move_up, n_move_down=n_move_down,
                    n_fall_height=float(n_fall_h_iter), n_fall_tilt=float(n_fall_t_iter),
                    mean_base_h=float(base_h_sum) / steps_per_iter,
-                   min_base_h=float(base_h_min) if base_h_min is not None else float("nan"))
+                   min_base_h=float(base_h_min) if base_h_min is not None else float("nan"),
+                   mean_n_contact=float(n_contact_sum) / steps_per_iter,
+                   mean_base_z=float(base_z_sum) / steps_per_iter,
+                   mean_foot_clear=float(foot_clear_sum) / steps_per_iter,
+                   min_foot_clear=float(foot_clear_min) if foot_clear_min is not None else float("nan"))
 
         vx_iter_track.append(vx_for_plot)
         losses.append(loss.item()); rewards.append(episodic_reward)
@@ -800,7 +859,12 @@ def train(num_iters=1000, steps_per_iter=24,
     # Where every robot ended up on the curriculum -- the distribution behind the
     # mean terrain_level curve. Rudin terrain only; flat ground has no curriculum.
     if getattr(env, "terrain_levels", None) is not None:
-        save_curriculum_snapshot(env, cfg, out)
+        # contact_sum_env is a sum over every step of the run; divide by the step count to get
+        # the per-robot mean, comparable to the mean_n_contact column in iters.csv.
+        n_steps_total = max(1, num_iters * steps_per_iter)
+        save_curriculum_snapshot(env, cfg, out,
+                                 mean_contacts=contact_sum_env / n_steps_total,
+                                 min_foot_clear=foot_clear_min_env)
 
     bench.close()
     print("[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).")
