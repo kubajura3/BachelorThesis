@@ -23,7 +23,7 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 # Settings -- edit these two, everything else follows
 # ----------------------------------------------------------------------------
-BSTAR="${BSTAR:-1024}"          # parallel robots for exp2; set from the smoke runs
+BSTAR="${BSTAR:-2048}"          # parallel robots for exp2; set from the smoke runs
 ITERS="${ITERS:-5000}"          # training iterations for exp2
 SEEDS="${SEEDS:-0 1 2}"         # seeds per mode for exp2; SEEDS=0 gives one run per mode
 BENCH_ITERS="${BENCH_ITERS:-100}"

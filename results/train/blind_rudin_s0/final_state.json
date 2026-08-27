@@ -1,12 +1,12 @@
 {
-  "num_robots": 1024,
+  "num_robots": 2048,
   "num_rows": 10,
   "num_cols": 20,
-  "mean_terrain_level": 0.0,
-  "max_terrain_level": 0,
+  "mean_terrain_level": 0.00048828125,
+  "max_terrain_level": 1,
   "terrain_level_hist": [
-    1024,
-    0,
+    2047,
+    1,
     0,
     0,
     0,
@@ -16,7 +16,7 @@
     0,
     0
   ],
-  "mean_distance_m": 0.8078981637954712,
+  "mean_distance_m": 0.9404821991920471,
   "column_to_family": [
     "smooth slope",
     "smooth slope",
@@ -41,34 +41,49 @@
   ],
   "by_terrain_family": {
     "discrete obstacles": {
-      "n_robots": 204,
+      "n_robots": 409,
       "mean_terrain_level": 0.0,
       "max_terrain_level": 0,
-      "mean_distance_m": 0.7485924363136292
+      "mean_distance_m": 0.9889150857925415,
+      "mean_n_contact": 3.186248302459717,
+      "min_foot_clear_m": -0.10657119005918503,
+      "mean_min_foot_clear_m": -0.010860078036785126
     },
     "rough slope": {
-      "n_robots": 102,
+      "n_robots": 205,
       "mean_terrain_level": 0.0,
       "max_terrain_level": 0,
-      "mean_distance_m": 0.819354236125946
+      "mean_distance_m": 0.8731510639190674,
+      "mean_n_contact": 2.538403034210205,
+      "min_foot_clear_m": -0.049660541117191315,
+      "mean_min_foot_clear_m": -0.031497661024332047
     },
     "smooth slope": {
-      "n_robots": 103,
-      "mean_terrain_level": 0.0,
-      "max_terrain_level": 0,
-      "mean_distance_m": 0.8354776501655579
+      "n_robots": 205,
+      "mean_terrain_level": 0.004878048780487805,
+      "max_terrain_level": 1,
+      "mean_distance_m": 1.0805442333221436,
+      "mean_n_contact": 3.1354475021362305,
+      "min_foot_clear_m": -0.013416387140750885,
+      "mean_min_foot_clear_m": 0.012930899858474731
     },
     "stairs down": {
-      "n_robots": 359,
+      "n_robots": 717,
       "mean_terrain_level": 0.0,
       "max_terrain_level": 0,
-      "mean_distance_m": 0.7923662066459656
+      "mean_distance_m": 0.9658248424530029,
+      "mean_n_contact": 3.056535005569458,
+      "min_foot_clear_m": -0.1179434061050415,
+      "mean_min_foot_clear_m": -0.015062104910612106
     },
     "stairs up": {
-      "n_robots": 256,
+      "n_robots": 512,
       "mean_terrain_level": 0.0,
       "max_terrain_level": 0,
-      "mean_distance_m": 0.8612775802612305
+      "mean_distance_m": 0.8371822237968445,
+      "mean_n_contact": 3.1087141036987305,
+      "min_foot_clear_m": -0.11911392211914062,
+      "mean_min_foot_clear_m": -0.009514080360531807
     }
   }
 }
