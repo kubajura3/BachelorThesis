@@ -71,6 +71,10 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 MODE_CFG = {
     "blind":       (dict(terrain_type="flat"),                                                                   ""),
     "blind_rudin": (dict(terrain_type="rudin"),                                                                  "_blindr"),
+    # Isolation arm: flat ground, but the Rudin omnidirectional command set. Pairs with `blind`
+    # (flat + fixed forward) to separate "the terrain is hard" from "the commands are hard" --
+    # the Exp-2 runs confound the two because terrain_type also picks the command ranges.
+    "blind_omni":  (dict(terrain_type="flat", cmd_style="rudin"),                                                "_blindomni"),
     "hobs":        (dict(terrain_type="rudin", use_perception=True, use_height_obs=True),                        "_hobs"),
     "hloss":       (dict(terrain_type="rudin", use_perception=True, use_terrain_loss=True),                      "_hloss"),
     "height":      (dict(terrain_type="rudin", use_perception=True, use_height_obs=True, use_terrain_loss=True), "_height"),
@@ -747,6 +751,14 @@ def train(num_iters=1000, steps_per_iter=24,
         bench.stop(loss=loss.item(), vx=vx_for_plot, grad_norm=grad_norm,
                    terrain_level=terrain_level,
                    loss_v=loss_v_hist_iter[-1], loss_clear=loss_clear_hist_iter[-1],
+                   # Attitude / effort terms alongside the two that were already here. All three
+                   # are already computed and cached above, so this costs nothing, and they are
+                   # the columns the Exp-2 post-mortem had to reconstruct from the .npy sidecars
+                   # by hand. loss_gproj in particular is the tilt measure the fall analysis turns
+                   # on -- see CAMPAIGN_FINDINGS.md sec 18.4.
+                   loss_gproj=loss_gproj_hist_iter[-1],
+                   loss_omega=loss_omega_hist_iter[-1],
+                   loss_ctrl=loss_ctrl_hist_iter[-1],
                    n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter),
                    n_move_up=n_move_up, n_move_down=n_move_down,
                    n_fall_height=float(n_fall_h_iter), n_fall_tilt=float(n_fall_t_iter),

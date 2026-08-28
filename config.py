@@ -272,6 +272,14 @@ class EnvCfg:
     rudin_cmd_ang_vel_yaw: tuple = (-1.0, 1.0) # [rad/s]
     rudin_cmd_deadband: float = 0.2            # zero (vx,vy) when |v_xy| < this (Rudin)
 
+    # Command style, decoupled from terrain_type so the two can be varied independently. The
+    # Exp-2 runs cannot say whether the fall rate comes from the rough ground or from the
+    # omnidirectional command set, because picking "rudin" terrain also picks the rudin command
+    # ranges -- this knob is what lets the two be measured apart (flat terrain + rudin commands).
+    # None = follow terrain_type, which reproduces every previous run bit-for-bit; the explicit
+    # values force one style regardless of the terrain.
+    cmd_style: str = None                      # None | "rudin" | "rand" | "fixed"
+
 
     # contact & friction
     contact_thresh_n: float = 8.0

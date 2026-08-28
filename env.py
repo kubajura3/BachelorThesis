@@ -681,7 +681,20 @@ class RealQuadEnv:
         dev = self.device
         n = env_ids.numel()
         cfg = self.cfg
-        if getattr(cfg, "terrain_type", "flat") == "rudin":
+        # Which command distribution to draw from. cfg.cmd_style pins it explicitly; None (the
+        # default) falls back to the terrain-derived choice this method used before the knob
+        # existed, so every previous run reproduces exactly. Decoupling the two is what makes
+        # "flat terrain, Rudin commands" runnable -- see cfg.cmd_style in config.py.
+        style = getattr(cfg, "cmd_style", None)
+        if style is None:
+            if getattr(cfg, "terrain_type", "flat") == "rudin":
+                style = "rudin"
+            elif cfg.rand_cmd:
+                style = "rand"
+            else:
+                style = "fixed"
+
+        if style == "rudin":
             # Rudin-matched omnidirectional command (fair comparison): vx, vy, yaw drawn from the
             # rudin_cmd_* ranges, then zero tiny planar commands so "stand still" is a valid target
             # (mirrors legged_robot._resample_commands' deadband).
@@ -692,7 +705,7 @@ class RealQuadEnv:
             keep = (torch.sqrt(vx * vx + vy * vy) > float(cfg.rudin_cmd_deadband)).to(vx.dtype)
             vx = vx * keep
             vy = vy * keep
-        elif cfg.rand_cmd:
+        elif style == "rand":
             vx  = torch.empty(n, device=dev).uniform_(cfg.vx_min,  cfg.vx_max)
             vy  = torch.empty(n, device=dev).uniform_(cfg.vy_min,  cfg.vy_max)
             yaw = torch.empty(n, device=dev).uniform_(cfg.yaw_min, cfg.yaw_max)
