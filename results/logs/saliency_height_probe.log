@@ -1,0 +1,122 @@
+Importing module 'gym_38' (/home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/jakub/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/jakub/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/jakub/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+[SRBD] Custom CUDA kernel active (CUDA_KERNEL_SRBD=True in config.py).
+[physx] rudin buffers: default_buffer_size_multiplier=5.0 max_gpu_contact_pairs=8388608
+[env] creating PhysX simulation
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[env] simulation created
+[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape
+[terrain] adding Rudin curriculum-grid triangle mesh
+[terrain] Rudin curriculum-grid mesh added
+[env] loading asset go2_description.urdf from /home/jakub/projects/BachelorThesis
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/base.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+
+[DBG] Asset DOFs in order:
+  00: FL_hip_joint
+  01: FL_thigh_joint
+  02: FL_calf_joint
+  03: FR_hip_joint
+  04: FR_thigh_joint
+  05: FR_calf_joint
+  06: RL_hip_joint
+  07: RL_thigh_joint
+  08: RL_calf_joint
+  09: RR_hip_joint
+  10: RR_thigh_joint
+  11: RR_calf_joint
+
+[DBG] Mapping to key12:
+  FL_hip       -> asset dof idx 0
+  FL_thigh     -> asset dof idx 1
+  FL_calf      -> asset dof idx 2
+  FR_hip       -> asset dof idx 3
+  FR_thigh     -> asset dof idx 4
+  FR_calf      -> asset dof idx 5
+  RL_hip       -> asset dof idx 6
+  RL_thigh     -> asset dof idx 7
+  RL_calf      -> asset dof idx 8
+  RR_hip       -> asset dof idx 9
+  RR_thigh     -> asset dof idx 10
+  RR_calf      -> asset dof idx 11
+[DBG] ctrl_idx (key12 -> raw_names index): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]
+[INFO] feet_local rigid bodies (FL,FR,RL,RR idx): [4, 8, 14, 18]
+[env] isaac env-grid origins: x [0.00, 0.00] y [0.00, 0.00] (spacing=0.0, num_per_row=32)
+[env] rudin actor create poses: x [4.00, 44.00] y [4.00, 156.00] z [-0.91, 1.61]
+Loading extension module gymtorch...
+driveMode unique (after set): {1}
+stiffness range: 60.0 – 60.0
+damping   range: 2.0 – 2.0
+[DBG] lower[12] = [-1.0472 -1.5708 -2.7227 -1.0472 -1.5708 -2.7227 -1.0472 -0.5236 -2.7227
+ -1.0472 -0.5236 -2.7227]
+[DBG] upper[12] = [ 1.0472   3.4907  -0.83776  1.0472   3.4907  -0.83776  1.0472   4.5379
+ -0.83776  1.0472   4.5379  -0.83776]
+[DBG] effort[12] = [23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43]
+[INFO] Jacobian detected as floating-base: cols=18, dof_count=12, offset=6
+[CHECK] foot_jacobians shape: (1024, 4, 3, 18)  (B,4,3,cols)
+[CHECK] J12 shape: (1024, 4, 3, 12)  (B,4,3,12)
+[CHECK] ||J12||: 31.845705032348633
+Warp 1.0.2 initialized:
+   CUDA Toolkit 11.5, Driver 13.0
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce GTX 1660 Ti" (6 GiB, sm_75, mempool enabled)
+   Kernel cache:
+     /home/jakub/.cache/warp/1.0.2
+[perception] collector ready (B=1024, device=cuda, terrain_type=rudin).
+[eval] Loaded policy weights from results/train/height_s0/quad_diffsim_srbd_align_multi_robot.pth.
+[eval] Evaluating on Rudin terrain: B=1024, seed=0, steps=2000, warmup=500, episode_length_s=20.0
+[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.111,-0.019) v_b=(+0.112,+0.005)
+[DBG_DIR t=00200] pos_w=(+12.601,+4.789) v_w=(+0.179,-0.238) v_b=(-0.174,+0.196)
+[DBG_DIR t=00400] pos_w=(+12.665,+4.772) v_w=(-0.025,-0.054) v_b=(+0.022,+0.065)
+[DBG_DIR t=00600] pos_w=(+12.678,+4.754) v_w=(+0.078,-0.021) v_b=(-0.080,+0.028)
+[DBG_DIR t=00800] pos_w=(+12.680,+4.747) v_w=(+0.016,+0.007) v_b=(-0.016,-0.001)
+[DBG_DIR t=01000] pos_w=(+12.695,+4.750) v_w=(-0.095,-0.049) v_b=(+0.095,+0.041)
+[DBG_DIR t=01200] pos_w=(+12.690,+4.748) v_w=(+0.047,+0.049) v_b=(-0.051,-0.039)
+[DBG_DIR t=01400] pos_w=(+12.684,+4.747) v_w=(-0.021,-0.024) v_b=(+0.020,+0.031)
+[DBG_DIR t=01600] pos_w=(+12.701,+4.752) v_w=(+0.019,-0.035) v_b=(-0.011,+0.004)
+[DBG_DIR t=01800] pos_w=(+12.692,+4.746) v_w=(+0.034,+0.021) v_b=(-0.037,-0.009)
+
+===== Rudin-terrain evaluation =====
+  mean_terrain_level: 1.8066321614583334
+  lin_vel_track_err: 0.2897778251369794
+  ang_vel_track_err: 0.6733346445560455
+  fall_rate: 1.0
+  mean_reset_distance: 0.9046243150866982
+  n_falls: 1380
+  n_timeouts: 0
+  corrupt_l1: 0.0
+  channel_l1: 0.03350915898258487
+  terrain_level_hist: [415, 164, 161, 133, 97, 54, 0, 0, 0, 0]
+  terrain_level_hist_start: [237, 173, 149, 165, 176, 124, 0, 0, 0, 0]
+
+[eval] Wrote results/saliency/eval_results_height_probe.json
+[eval] Wrote results/saliency/eval_results_height_probe.csv

@@ -1,0 +1,70 @@
+{
+  "tag": "hobs_none",
+  "config": {
+    "obs_mode": "height",
+    "corrupt": "none",
+    "corrupt_seed": 0,
+    "num_envs": 1024,
+    "seed": 0,
+    "steps": 15000,
+    "warmup": 2000,
+    "episode_length_s": 20.0,
+    "num_rows": 10,
+    "num_cols": 20,
+    "max_init_terrain_level": 5,
+    "terrain_proportions": [
+      0.1,
+      0.1,
+      0.35,
+      0.25,
+      0.2
+    ],
+    "cmd_lin_vel_x": [
+      -1.0,
+      1.0
+    ],
+    "cmd_lin_vel_y": [
+      -1.0,
+      1.0
+    ],
+    "cmd_ang_vel_yaw": [
+      -1.0,
+      1.0
+    ]
+  },
+  "metrics": {
+    "mean_terrain_level": 0.7593405198317308,
+    "lin_vel_track_err": 0.266905737183415,
+    "ang_vel_track_err": 0.6410809025168419,
+    "fall_rate": 0.9249405469678954,
+    "mean_reset_distance": 0.9777762287935324,
+    "n_falls": 6223,
+    "n_timeouts": 505,
+    "corrupt_l1": 0.0,
+    "channel_l1": 0.03146498995188337,
+    "terrain_level_hist": [
+      897,
+      52,
+      34,
+      32,
+      8,
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    "terrain_level_hist_start": [
+      432,
+      146,
+      155,
+      134,
+      110,
+      47,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}

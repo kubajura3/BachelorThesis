@@ -1,0 +1,187 @@
+Importing module 'gym_38' (/home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/jakub/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/jakub/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/jakub/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+[SRBD] Custom CUDA kernel active (CUDA_KERNEL_SRBD=True in config.py).
+[physx] rudin buffers: default_buffer_size_multiplier=5.0 max_gpu_contact_pairs=8388608
+[env] creating PhysX simulation
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[env] simulation created
+[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape
+[terrain] adding Rudin curriculum-grid triangle mesh
+[terrain] Rudin curriculum-grid mesh added
+[env] loading asset go2_description.urdf from /home/jakub/projects/BachelorThesis
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/base.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+
+[DBG] Asset DOFs in order:
+  00: FL_hip_joint
+  01: FL_thigh_joint
+  02: FL_calf_joint
+  03: FR_hip_joint
+  04: FR_thigh_joint
+  05: FR_calf_joint
+  06: RL_hip_joint
+  07: RL_thigh_joint
+  08: RL_calf_joint
+  09: RR_hip_joint
+  10: RR_thigh_joint
+  11: RR_calf_joint
+
+[DBG] Mapping to key12:
+  FL_hip       -> asset dof idx 0
+  FL_thigh     -> asset dof idx 1
+  FL_calf      -> asset dof idx 2
+  FR_hip       -> asset dof idx 3
+  FR_thigh     -> asset dof idx 4
+  FR_calf      -> asset dof idx 5
+  RL_hip       -> asset dof idx 6
+  RL_thigh     -> asset dof idx 7
+  RL_calf      -> asset dof idx 8
+  RR_hip       -> asset dof idx 9
+  RR_thigh     -> asset dof idx 10
+  RR_calf      -> asset dof idx 11
+[DBG] ctrl_idx (key12 -> raw_names index): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]
+[INFO] feet_local rigid bodies (FL,FR,RL,RR idx): [4, 8, 14, 18]
+[env] isaac env-grid origins: x [0.00, 0.00] y [0.00, 0.00] (spacing=0.0, num_per_row=32)
+[env] rudin actor create poses: x [4.00, 44.00] y [4.00, 156.00] z [-0.91, 1.61]
+Loading extension module gymtorch...
+driveMode unique (after set): {1}
+stiffness range: 60.0 – 60.0
+damping   range: 2.0 – 2.0
+[DBG] lower[12] = [-1.0472 -1.5708 -2.7227 -1.0472 -1.5708 -2.7227 -1.0472 -0.5236 -2.7227
+ -1.0472 -0.5236 -2.7227]
+[DBG] upper[12] = [ 1.0472   3.4907  -0.83776  1.0472   3.4907  -0.83776  1.0472   4.5379
+ -0.83776  1.0472   4.5379  -0.83776]
+[DBG] effort[12] = [23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43]
+[INFO] Jacobian detected as floating-base: cols=18, dof_count=12, offset=6
+[CHECK] foot_jacobians shape: (1024, 4, 3, 18)  (B,4,3,cols)
+[CHECK] J12 shape: (1024, 4, 3, 12)  (B,4,3,12)
+[CHECK] ||J12||: 31.845705032348633
+Warp 1.0.2 initialized:
+   CUDA Toolkit 11.5, Driver 13.0
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce GTX 1660 Ti" (6 GiB, sm_75, mempool enabled)
+   Kernel cache:
+     /home/jakub/.cache/warp/1.0.2
+[perception] collector ready (B=1024, device=cuda, terrain_type=rudin).
+[eval] Loaded policy weights from results/train/hobs_s0/quad_diffsim_srbd_align_multi_robot.pth.
+[eval] Evaluating on Rudin terrain: B=1024, seed=0, steps=15000, warmup=2000, episode_length_s=20.0
+[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.110,-0.019) v_b=(+0.111,+0.005)
+[DBG_DIR t=00200] pos_w=(+12.600,+4.787) v_w=(+0.187,-0.222) v_b=(-0.180,+0.181)
+[DBG_DIR t=00400] pos_w=(+12.674,+4.782) v_w=(-0.062,-0.011) v_b=(+0.060,+0.027)
+[DBG_DIR t=00600] pos_w=(+12.685,+4.771) v_w=(+0.146,-0.036) v_b=(-0.152,+0.048)
+[DBG_DIR t=00800] pos_w=(+12.695,+4.754) v_w=(+0.009,+0.032) v_b=(-0.013,+0.001)
+[DBG_DIR t=01000] pos_w=(+12.715,+4.795) v_w=(-0.107,+0.048) v_b=(+0.114,-0.031)
+[DBG_DIR t=01200] pos_w=(+12.694,+4.785) v_w=(+0.101,-0.126) v_b=(-0.114,+0.145)
+[DBG_DIR t=01400] pos_w=(+12.716,+4.740) v_w=(+0.009,-0.032) v_b=(-0.015,+0.056)
+[DBG_DIR t=01600] pos_w=(+12.739,+4.785) v_w=(+0.043,+0.089) v_b=(-0.011,-0.130)
+[DBG_DIR t=01800] pos_w=(+12.708,+4.785) v_w=(+0.070,-0.202) v_b=(-0.086,+0.216)
+[DBG_DIR t=02000] pos_w=(+12.740,+4.720) v_w=(-0.008,-0.073) v_b=(-0.001,+0.086)
+[DBG_DIR t=02200] pos_w=(+12.762,+4.756) v_w=(+0.086,+0.192) v_b=(-0.059,-0.213)
+[DBG_DIR t=02400] pos_w=(+12.729,+4.772) v_w=(+0.058,-0.202) v_b=(-0.072,+0.195)
+[DBG_DIR t=02600] pos_w=(+12.765,+4.705) v_w=(-0.038,-0.106) v_b=(+0.027,+0.115)
+[DBG_DIR t=02800] pos_w=(+12.781,+4.729) v_w=(+0.112,+0.236) v_b=(-0.107,-0.240)
+[DBG_DIR t=03000] pos_w=(+12.753,+4.767) v_w=(-0.026,-0.088) v_b=(+0.021,+0.074)
+[DBG_DIR t=03200] pos_w=(+12.782,+4.689) v_w=(-0.028,-0.179) v_b=(+0.013,+0.174)
+[DBG_DIR t=03400] pos_w=(+12.803,+4.689) v_w=(+0.077,+0.184) v_b=(-0.085,-0.173)
+[DBG_DIR t=03600] pos_w=(+12.779,+4.722) v_w=(-0.130,+0.027) v_b=(+0.133,-0.012)
+[DBG_DIR t=03800] pos_w=(+12.808,+4.677) v_w=(-0.003,-0.172) v_b=(+0.010,+0.144)
+[DBG_DIR t=04000] pos_w=(+12.816,+4.671) v_w=(+0.066,+0.150) v_b=(-0.079,-0.135)
+[DBG_DIR t=04200] pos_w=(+12.809,+4.683) v_w=(-0.117,-0.008) v_b=(+0.115,+0.027)
+[DBG_DIR t=04400] pos_w=(+12.826,+4.677) v_w=(+0.158,-0.019) v_b=(-0.129,-0.018)
+[DBG_DIR t=04600] pos_w=(+12.810,+4.676) v_w=(+0.035,+0.030) v_b=(-0.041,-0.018)
+[DBG_DIR t=04800] pos_w=(+12.815,+4.676) v_w=(-0.102,-0.009) v_b=(+0.101,+0.016)
+[DBG_DIR t=05000] pos_w=(+12.828,+4.678) v_w=(+0.112,+0.011) v_b=(-0.110,-0.008)
+[DBG_DIR t=05200] pos_w=(+12.811,+4.668) v_w=(+0.005,+0.053) v_b=(-0.011,-0.031)
+[DBG_DIR t=05400] pos_w=(+12.828,+4.686) v_w=(-0.147,+0.011) v_b=(+0.147,+0.001)
+[DBG_DIR t=05600] pos_w=(+12.817,+4.687) v_w=(+0.123,-0.035) v_b=(-0.127,+0.055)
+[DBG_DIR t=05800] pos_w=(+12.820,+4.670) v_w=(-0.018,+0.038) v_b=(+0.014,-0.014)
+[DBG_DIR t=06000] pos_w=(+12.839,+4.679) v_w=(-0.072,+0.009) v_b=(+0.076,-0.014)
+[DBG_DIR t=06200] pos_w=(+12.826,+4.687) v_w=(+0.095,+0.002) v_b=(-0.106,+0.022)
+[DBG_DIR t=06400] pos_w=(+12.829,+4.650) v_w=(+0.001,-0.030) v_b=(-0.008,+0.054)
+[DBG_DIR t=06600] pos_w=(+12.851,+4.694) v_w=(+0.032,+0.062) v_b=(-0.002,-0.107)
+[DBG_DIR t=06800] pos_w=(+12.813,+4.701) v_w=(+0.060,-0.122) v_b=(-0.067,+0.135)
+[DBG_DIR t=07000] pos_w=(+12.844,+4.662) v_w=(-0.041,-0.071) v_b=(+0.041,+0.070)
+[DBG_DIR t=07200] pos_w=(+12.860,+4.681) v_w=(+0.084,+0.132) v_b=(-0.062,-0.152)
+[DBG_DIR t=07400] pos_w=(+12.831,+4.703) v_w=(+0.026,-0.137) v_b=(-0.036,+0.129)
+[DBG_DIR t=07600] pos_w=(+12.855,+4.653) v_w=(-0.064,-0.116) v_b=(+0.056,+0.112)
+[DBG_DIR t=07800] pos_w=(+12.873,+4.666) v_w=(+0.085,+0.166) v_b=(-0.074,-0.177)
+[DBG_DIR t=08000] pos_w=(+12.837,+4.688) v_w=(-0.079,+0.040) v_b=(+0.081,-0.013)
+[DBG_DIR t=08200] pos_w=(+12.852,+4.663) v_w=(-0.091,-0.060) v_b=(+0.079,+0.077)
+[DBG_DIR t=08400] pos_w=(+12.863,+4.672) v_w=(+0.141,+0.123) v_b=(-0.137,-0.126)
+[DBG_DIR t=08600] pos_w=(+12.844,+4.679) v_w=(-0.094,-0.017) v_b=(+0.091,+0.032)
+[DBG_DIR t=08800] pos_w=(+12.869,+4.668) v_w=(+0.013,-0.064) v_b=(-0.011,+0.040)
+[DBG_DIR t=09000] pos_w=(+12.867,+4.668) v_w=(+0.076,-0.020) v_b=(-0.083,+0.028)
+[DBG_DIR t=09200] pos_w=(+12.867,+4.651) v_w=(-0.059,+0.004) v_b=(+0.058,+0.017)
+[DBG_DIR t=09400] pos_w=(+12.883,+4.665) v_w=(+0.130,+0.016) v_b=(-0.096,-0.078)
+[DBG_DIR t=09600] pos_w=(+12.854,+4.668) v_w=(+0.030,+0.010) v_b=(-0.032,-0.001)
+[DBG_DIR t=09800] pos_w=(+12.866,+4.671) v_w=(-0.125,-0.002) v_b=(+0.123,+0.017)
+[DBG_DIR t=10000] pos_w=(+12.868,+4.665) v_w=(+0.117,+0.020) v_b=(-0.120,-0.021)
+[DBG_DIR t=10200] pos_w=(+4.105,+4.741) v_w=(+0.140,+0.702) v_b=(+0.716,-0.045)
+[DBG_DIR t=10400] pos_w=(+4.135,+4.987) v_w=(+0.001,+0.650) v_b=(+0.572,-0.173)
+[DBG_DIR t=10600] pos_w=(+4.085,+5.102) v_w=(-0.293,+0.115) v_b=(+0.237,+0.209)
+[DBG_DIR t=10800] pos_w=(+4.065,+5.187) v_w=(+0.035,+0.011) v_b=(+0.015,-0.051)
+[DBG_DIR t=11000] pos_w=(+3.957,+5.238) v_w=(-0.539,+0.394) v_b=(+0.662,-0.075)
+[DBG_DIR t=11200] pos_w=(+3.753,+5.352) v_w=(-0.538,+0.163) v_b=(+0.451,+0.314)
+[DBG_DIR t=11400] pos_w=(+3.588,+5.501) v_w=(-0.446,+0.432) v_b=(+0.361,+0.105)
+[DBG_DIR t=11600] pos_w=(+3.630,+4.419) v_w=(+0.119,+0.646) v_b=(+0.449,-0.407)
+[DBG_DIR t=11800] pos_w=(+3.708,+4.618) v_w=(+0.121,+0.737) v_b=(+0.626,-0.488)
+[DBG_DIR t=12000] pos_w=(+4.074,+3.171) v_w=(-0.292,-0.116) v_b=(+0.006,+0.334)
+[DBG_DIR t=12200] pos_w=(+4.019,+3.126) v_w=(+0.043,-0.142) v_b=(-0.157,+0.042)
+[DBG_DIR t=12400] pos_w=(+4.054,+3.118) v_w=(+0.050,+0.121) v_b=(+0.091,-0.098)
+[DBG_DIR t=12600] pos_w=(+4.015,+3.080) v_w=(-0.186,-0.092) v_b=(+0.002,+0.166)
+[DBG_DIR t=12800] pos_w=(+4.005,+3.096) v_w=(+0.082,+0.144) v_b=(+0.068,-0.130)
+[DBG_DIR t=13000] pos_w=(+4.037,+3.134) v_w=(-0.088,+0.036) v_b=(+0.065,+0.062)
+[DBG_DIR t=13200] pos_w=(+3.989,+3.068) v_w=(+0.006,-0.191) v_b=(-0.180,+0.057)
+[DBG_DIR t=13400] pos_w=(+4.005,+3.068) v_w=(+0.037,-0.070) v_b=(-0.076,-0.027)
+[DBG_DIR t=13600] pos_w=(+4.050,+3.029) v_w=(-0.090,+0.074) v_b=(+0.102,+0.073)
+[DBG_DIR t=13800] pos_w=(+4.014,+2.988) v_w=(+0.017,-0.243) v_b=(-0.230,+0.087)
+[DBG_DIR t=14000] pos_w=(+4.014,+2.964) v_w=(+0.026,-0.011) v_b=(-0.022,-0.067)
+[DBG_DIR t=14200] pos_w=(+4.086,+2.952) v_w=(+0.015,+0.114) v_b=(+0.100,-0.044)
+[DBG_DIR t=14400] pos_w=(+4.039,+2.951) v_w=(-0.170,-0.179) v_b=(-0.115,+0.232)
+[DBG_DIR t=14600] pos_w=(+4.011,+2.925) v_w=(+0.059,+0.018) v_b=(-0.004,-0.058)
+[DBG_DIR t=14800] pos_w=(+4.078,+2.926) v_w=(+0.060,+0.042) v_b=(+0.028,-0.077)
+
+===== Rudin-terrain evaluation =====
+  mean_terrain_level: 0.7348493088942307
+  lin_vel_track_err: 0.26574986012394614
+  ang_vel_track_err: 0.6386354907980332
+  fall_rate: 0.9369356456929913
+  mean_reset_distance: 0.9710107339585863
+  n_falls: 6537
+  n_timeouts: 440
+  corrupt_l1: 0.03327970669461557
+  channel_l1: 0.03122670301522773
+  terrain_level_hist: [899, 63, 39, 15, 8, 0, 0, 0, 0, 0]
+  terrain_level_hist_start: [428, 159, 127, 140, 115, 55, 0, 0, 0, 0]
+
+[eval] Wrote results/saliency/eval_results_hobs_shuffle.json
+[eval] Wrote results/saliency/eval_results_hobs_shuffle.csv

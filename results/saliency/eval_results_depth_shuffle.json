@@ -1,0 +1,70 @@
+{
+  "tag": "depth_shuffle",
+  "config": {
+    "obs_mode": "depth",
+    "corrupt": "shuffle",
+    "corrupt_seed": 0,
+    "num_envs": 1024,
+    "seed": 0,
+    "steps": 15000,
+    "warmup": 2000,
+    "episode_length_s": 20.0,
+    "num_rows": 10,
+    "num_cols": 20,
+    "max_init_terrain_level": 5,
+    "terrain_proportions": [
+      0.1,
+      0.1,
+      0.35,
+      0.25,
+      0.2
+    ],
+    "cmd_lin_vel_x": [
+      -1.0,
+      1.0
+    ],
+    "cmd_lin_vel_y": [
+      -1.0,
+      1.0
+    ],
+    "cmd_ang_vel_yaw": [
+      -1.0,
+      1.0
+    ]
+  },
+  "metrics": {
+    "mean_terrain_level": 0.8120381610576923,
+    "lin_vel_track_err": 0.2618628642673676,
+    "ang_vel_track_err": 0.6340607453997319,
+    "fall_rate": 0.9183156561659015,
+    "mean_reset_distance": 0.9966461596597981,
+    "n_falls": 5801,
+    "n_timeouts": 516,
+    "corrupt_l1": 0.16688813308683725,
+    "channel_l1": 0.387827630180579,
+    "terrain_level_hist": [
+      867,
+      74,
+      45,
+      27,
+      10,
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    "terrain_level_hist_start": [
+      402,
+      160,
+      169,
+      136,
+      99,
+      58,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}
