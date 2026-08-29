@@ -28,6 +28,8 @@ import numpy as np
 import torch
 
 from config import (
+    heading_command_active,
+    resolve_cmd_style,
     DBG_INIT_FALL,
     FORCE_DTYPE,
     DBG_INIT_FALL_ENV,
@@ -76,6 +78,13 @@ class RealQuadEnv:
         # High-level velocity command: cmd_rand = [vx_cmd, vy_cmd, yaw_rate_cmd]
         self.cmd_rand = torch.zeros(self.B, 3, device=self.device)   # (B,3)
         self.vx_star  = torch.zeros(self.B, device=self.device)      # alias used by Raibert / loss
+        # Target heading for cfg.heading_command (legged_gym's commands[:, 3]). Only written when
+        # that flag is on; cmd_rand[:, 2] is then recomputed from it every step() rather than held
+        # constant for the episode. Allocated unconditionally so callers can read it without a
+        # hasattr guard.
+        self.cmd_heading = torch.zeros(self.B, device=self.device)   # (B,)
+        # Resolved once: step() checks it every call and the answer cannot change mid-run.
+        self._heading_cmd = heading_command_active(cfg)
 
         # Rudin dynamic-curriculum bookkeeping (only used when terrain_type == "rudin" and
         # rudin_terrain.dynamic_curriculum). ep_len_buf counts env.step() calls since the last reset;
@@ -681,18 +690,11 @@ class RealQuadEnv:
         dev = self.device
         n = env_ids.numel()
         cfg = self.cfg
-        # Which command distribution to draw from. cfg.cmd_style pins it explicitly; None (the
-        # default) falls back to the terrain-derived choice this method used before the knob
-        # existed, so every previous run reproduces exactly. Decoupling the two is what makes
-        # "flat terrain, Rudin commands" runnable -- see cfg.cmd_style in config.py.
-        style = getattr(cfg, "cmd_style", None)
-        if style is None:
-            if getattr(cfg, "terrain_type", "flat") == "rudin":
-                style = "rudin"
-            elif cfg.rand_cmd:
-                style = "rand"
-            else:
-                style = "fixed"
+        # Which command distribution to draw from -- see resolve_cmd_style(). Factored out of
+        # this method so train.py can ask the same question when it decides whether a run has a
+        # live yaw command; when the two were resolved independently they drifted apart, which
+        # is what left blind_omni penalising its own yaw command (CAMPAIGN_FINDINGS.md 19.9).
+        style = resolve_cmd_style(cfg)
 
         if style == "rudin":
             # Rudin-matched omnidirectional command (fair comparison): vx, vy, yaw drawn from the
@@ -705,6 +707,15 @@ class RealQuadEnv:
             keep = (torch.sqrt(vx * vx + vy * vy) > float(cfg.rudin_cmd_deadband)).to(vx.dtype)
             vx = vx * keep
             vy = vy * keep
+            if getattr(cfg, "heading_command", False):
+                # legged_gym's default: sample a target heading and let step() derive the yaw-rate
+                # command from the heading error each step (legged_robot.py:327-330). The value
+                # written to cmd_rand[:, 2] below is only the t=0 seed -- _update_heading_command()
+                # overwrites it after every physics step.
+                hr = cfg.cmd_heading_range
+                self.cmd_heading[env_ids] = torch.empty(n, device=dev).uniform_(
+                    float(hr[0]), float(hr[1])
+                )
         elif style == "rand":
             vx  = torch.empty(n, device=dev).uniform_(cfg.vx_min,  cfg.vx_max)
             vy  = torch.empty(n, device=dev).uniform_(cfg.vy_min,  cfg.vy_max)
@@ -718,6 +729,43 @@ class RealQuadEnv:
         self.cmd_rand[env_ids, 1] = vy
         self.cmd_rand[env_ids, 2] = yaw
         self.vx_star[env_ids]     = vx   # alias still used by Raibert / loss
+        if style == "rudin" and getattr(cfg, "heading_command", False):
+            # Seed cmd_rand[:, 2] for these envs now, so the command is well defined before the
+            # first step() of the new episode (get_obs / the gait planner read it in between).
+            # Uses last_reset_yaw rather than self.yaw: _write_spawn_pose ran just above and set
+            # it to the new spawn yaw, whereas self.yaw is only refreshed by the _update_cache()
+            # that comes *after* this in reset_envs, so it still holds the pre-reset attitude.
+            self._update_heading_command(env_ids, yaw=self.last_reset_yaw[env_ids])
+
+    def _update_heading_command(self, env_ids=None, yaw=None):
+        """Recompute cmd_rand[:, 2] from the heading error (legged_gym heading_command).
+
+        Port of ``legged_robot._post_physics_step_callback``'s
+
+            commands[:, 2] = clip(0.5 * wrap_to_pi(heading_target - heading), -1, 1)
+
+        (legged_robot.py:327-330). The commanded yaw *rate* therefore decays to zero as the robot
+        turns to face its target, instead of being sampled once and held for the whole 20 s
+        episode. Clip bounds come from ``rudin_cmd_ang_vel_yaw`` so the existing range knob still
+        governs; legged_gym hardcodes +-1, which is that field's default.
+
+        Args:
+            env_ids: subset to update, or None for all robots.
+            yaw: current yaw to measure the error against. Defaults to the cached ``self.yaw``;
+                pass an explicit value when the cache is known to be stale (see _sample_command).
+        """
+        cfg = self.cfg
+        if env_ids is None:
+            env_ids = slice(None)
+        if yaw is None:
+            yaw = self.yaw[env_ids]
+        err = self.cmd_heading[env_ids] - yaw
+        # wrap to [-pi, pi] -- same idiom as the yaw loss in train.py
+        err = torch.atan2(torch.sin(err), torch.cos(err))
+        lo, hi = cfg.rudin_cmd_ang_vel_yaw
+        self.cmd_rand[env_ids, 2] = torch.clamp(
+            float(cfg.heading_to_yaw_gain) * err, float(lo), float(hi)
+        )
 
     def _sample_step_freq(self, env_ids):
         """Sample per-env step frequency. rand_step_freq off -> constant cfg.step_freq."""
@@ -1385,6 +1433,13 @@ class RealQuadEnv:
                     self.gym.destroy_viewer(self.viewer); self.viewer = None
 
         self._update_cache()
+
+        # Heading command: re-derive the yaw-rate command from the freshly cached attitude, so it
+        # shrinks as the robot turns toward its target heading. Must follow _update_cache(), which
+        # is what refreshes self.yaw from the post-step Isaac state. No-op unless the run enables
+        # cfg.heading_command on the "rudin" command style.
+        if self._heading_cmd:
+            self._update_heading_command()
 
         # ===== debug: world vs body velocity/position direction (env0) =====
         if self.t % 200 == 0:

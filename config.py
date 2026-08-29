@@ -5,6 +5,35 @@ from dataclasses import dataclass, field
 # NOT pull in torch/warp -- those load lazily only when use_perception is enabled.
 from perception.config import PerceptionCfg
 
+def resolve_cmd_style(cfg):
+    """Which velocity-command distribution a config selects: "rudin" | "rand" | "fixed".
+
+    ``cfg.cmd_style`` pins it explicitly; ``None`` (the default) falls back to the
+    terrain-derived choice ``_sample_command`` used before that knob existed, so every run
+    predating it reproduces exactly.
+
+    Module-level on purpose: ``train.py`` needs the same answer to decide whether a run carries
+    a live yaw command, and resolving it independently there is precisely how ``blind_omni``
+    ended up drawing Rudin yaw commands while the loss still measured yaw against a fixed reset
+    heading (CAMPAIGN_FINDINGS.md 19.9).
+    """
+    style = getattr(cfg, "cmd_style", None)
+    if style is not None:
+        return style
+    if getattr(cfg, "terrain_type", "flat") == "rudin":
+        return "rudin"
+    return "rand" if cfg.rand_cmd else "fixed"
+
+
+def heading_command_active(cfg):
+    """True when the yaw command is derived from a target heading rather than held constant.
+
+    Gated on the "rudin" command style as well as the flag: the forward-only and rand styles
+    have no yaw command to redefine.
+    """
+    return bool(getattr(cfg, "heading_command", False)) and resolve_cmd_style(cfg) == "rudin"
+
+
 # ===============================
 # Pure Paper Mode Switch
 # ===============================
@@ -279,6 +308,20 @@ class EnvCfg:
     # None = follow terrain_type, which reproduces every previous run bit-for-bit; the explicit
     # values force one style regardless of the terrain.
     cmd_style: str = None                      # None | "rudin" | "rand" | "fixed"
+
+    # Heading-based yaw command (legged_gym's commands.heading_command, which is True in every
+    # config the PPO baseline actually runs: legged_robot_config.py:70, MGDP
+    # random_dog_config_stage1.py:96 and stage2.py:103). legged_gym samples a *target heading*
+    # and derives the yaw-rate command from the heading error every step
+    # (legged_robot.py:327-330), so the command decays to zero once the robot faces its target.
+    # This repo instead sampled a yaw *rate* and held it for the whole 20 s episode, which is a
+    # strictly harder task than the baseline's -- an unintended mismatch in the Exp-1
+    # DiffSim-vs-PPO comparison rather than a deliberate choice. Only active on the "rudin"
+    # command style. Default False so every run already on disk reproduces bit-for-bit.
+    heading_command: bool = False
+    cmd_heading_range: tuple = (-3.141592653589793, 3.141592653589793)  # [rad], legged_gym's heading
+    # Proportional gain turning heading error into a yaw-rate command. legged_gym hardcodes 0.5.
+    heading_to_yaw_gain: float = 0.5
 
 
     # contact & friction

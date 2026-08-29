@@ -54,7 +54,7 @@ from config import (
     ONLY_ITERATE_NO_RESET,
     PURE_PAPER_MODE,
 )
-from env import RealQuadEnv
+from env import RealQuadEnv, heading_command_active, resolve_cmd_style
 from policy import Policy, VisionPolicy
 from terrain import terrain_family_by_column
 from utils_math import (
@@ -75,6 +75,10 @@ MODE_CFG = {
     # (flat + fixed forward) to separate "the terrain is hard" from "the commands are hard" --
     # the Exp-2 runs confound the two because terrain_type also picks the command ranges.
     "blind_omni":  (dict(terrain_type="flat", cmd_style="rudin"),                                                "_blindomni"),
+    # As blind_omni, but with legged_gym's heading command: the yaw target is a heading and the
+    # yaw-rate command decays as the robot turns to face it, instead of being held for the whole
+    # episode. Pairs with `blind_omni` to isolate that one change -- see CAMPAIGN_FINDINGS.md 19.10.
+    "blind_omni_heading": (dict(terrain_type="flat", cmd_style="rudin", heading_command=True),                    "_blindomnih"),
     "hobs":        (dict(terrain_type="rudin", use_perception=True, use_height_obs=True),                        "_hobs"),
     "hloss":       (dict(terrain_type="rudin", use_perception=True, use_terrain_loss=True),                      "_hloss"),
     "height":      (dict(terrain_type="rudin", use_perception=True, use_height_obs=True, use_terrain_loss=True), "_height"),
@@ -215,9 +219,10 @@ def train(num_iters=1000, steps_per_iter=24,
         cfg.num_envs = int(num_envs)
 
     if cfg.terrain_type == "flat":
-        # Flat-ground command: a fixed forward 0.5 m/s. On the Rudin terrain these
-        # are ignored -- env._sample_command switches to the Rudin-matched
-        # omnidirectional ranges whenever terrain_type == "rudin".
+        # Flat-ground command: a fixed forward 0.5 m/s. Ignored whenever the resolved command
+        # style is "rudin" -- _sample_command then draws from the rudin_cmd_* ranges instead.
+        # That is the terrain_type == "rudin" default, and also flat runs that set cmd_style
+        # explicitly (blind_omni), which is why this stays keyed on the terrain.
         cfg.rand_cmd = False
         cfg.vx_min = +0.5
         cfg.vx_max = +0.5
@@ -236,6 +241,10 @@ def train(num_iters=1000, steps_per_iter=24,
         "force_dtype": FORCE_DTYPE,
         "pure_paper_mode": PURE_PAPER_MODE,
         "terrain_type": cfg.terrain_type,
+        # The command protocol, recorded because terrain_type no longer implies it: 19.2
+        # decoupled the two and a run folder is otherwise unable to say which arm it is.
+        "cmd_style": resolve_cmd_style(cfg),
+        "heading_command": heading_command_active(cfg),
         "dt": cfg.dt,
         # One iteration advances physics steps_per_iter times, so this converts an
         # iteration index into simulated seconds per robot -- the x-axis that makes
@@ -271,10 +280,22 @@ def train(num_iters=1000, steps_per_iter=24,
     a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01, 0.5, 5.0
     a7 = 3.0
     use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
-    # True only on the Rudin curriculum grid. Gates the terrain-relative height reference and
-    # the commanded-yaw reference below, so flat / rough runs keep their previous behaviour
-    # exactly (and the flat control run stays a valid regression test of both).
+    # True only on the Rudin curriculum grid. Gates the terrain-relative height reference below,
+    # so flat / rough runs keep their previous behaviour exactly (and the flat control run stays a
+    # valid regression test of it). Deliberately still terrain-derived: that reference is about
+    # the ground, not about the command.
     on_terrain = (cfg.terrain_type == "rudin")
+    # True when the run carries a live yaw command, which is what the yaw reference below actually
+    # depends on. This used to reuse `on_terrain`, which was equivalent only while terrain_type
+    # also selected the command ranges. 19.2 decoupled them and the gate was not updated, so
+    # `blind_omni` (flat terrain + Rudin commands) drew yaw commands from +-1 rad/s while loss_yaw
+    # still measured yaw against a *fixed* reset heading. loss_omega's yaw-rate term then rewarded
+    # obeying that command (a3 = 0.01) while loss_yaw punished the heading drift obeying it
+    # produces (yaw_w = 0.1) -- two terms pulling opposite ways, the wrong one 10x heavier. That
+    # confounded the 19 arm-A measurement; see CAMPAIGN_FINDINGS.md 19.9. Resolved through the
+    # same helper _sample_command uses so the two cannot drift apart again.
+    cmd_has_yaw = (resolve_cmd_style(cfg) == "rudin")
+    use_heading_cmd = heading_command_active(cfg)
 
     pbar = tqdm(range(num_iters), ncols=92)
     losses = []; rewards = []
@@ -287,6 +308,8 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_gproj_hist_iter = []
     loss_foot_hist_iter = []
     loss_clear_hist_iter = []
+    loss_yaw_hist_iter = []
+    mean_abs_yaw_cmd_iter = []
     terrain_level_iter = []
 
     # Per-robot ground-contact diagnostics, accumulated across the whole run and dumped by
@@ -454,7 +477,12 @@ def train(num_iters=1000, steps_per_iter=24,
             q_body_hist.append(env.srbd_q.clone())
             pz_hist.append(pz_hat.clone())
             cmd_hist.append(env.cmd_rand.clone())      # current [vx_cmd, vy_cmd, yaw_cmd]
-            if on_terrain:
+            if use_heading_cmd:
+                # Heading command: the target heading *is* the reference, already absolute. The
+                # yaw rate in cmd_rand[:, 2] is derived from it each step, so integrating that
+                # rate the way the branch below does would double-count the same signal.
+                yawref_hist.append(env.cmd_heading.clone())
+            elif cmd_has_yaw:
                 # Where the yaw command says this robot should be pointing right now: the yaw it
                 # was reset to, plus the commanded yaw rate integrated over its time since reset.
                 # Captured per step rather than rebuilt after the loop so that a robot which
@@ -560,14 +588,20 @@ def train(num_iters=1000, steps_per_iter=24,
             cosy_cosp = 1.0 - 2.0 * (qy*qy + qz*qz)
             yaw_seq = torch.atan2(siny_cosp, cosy_cosp)   # (T,B)
 
-            # Reference yaw (no grad): the yaw at reset, advanced by the *commanded* yaw rate.
-            # Holding the reset yaw is right only when the yaw command is zero; on the Rudin
-            # terrain _sample_command draws it from +-1 rad/s, so the old fixed reference
-            # penalised a robot for obeying its own command -- and since the reference was
-            # pinned at reset and an episode is ~417 iterations, the penalty saturated near
-            # pi^2 * yaw_w instead of decaying. Integrating the command makes this yaw tracking,
-            # matching Rudin's tracking_ang_vel reward. Off the Rudin terrain nothing is
-            # recorded, so flat / rough fall through to the previous expression unchanged.
+            # Reference yaw (no grad). Three cases, selected by the gates near the top of the
+            # loop:
+            #   heading command  -> env.cmd_heading, the target heading itself;
+            #   yaw command      -> the reset yaw advanced by the *commanded* yaw rate;
+            #   no yaw command   -> the reset yaw, held.
+            # Holding the reset yaw is right only when the yaw command is zero. Whenever one is
+            # live, a fixed reference penalises a robot for obeying its own command -- and since
+            # the reference is pinned at reset and an episode is ~417 iterations, the penalty
+            # saturates near pi^2 * yaw_w instead of decaying. Integrating the command makes this
+            # yaw tracking. Note this is *heading angle*, distinct from the yaw-*rate* tracking
+            # already inside loss_omega ((omega_z - yaw_cmd)^2, a3 = 0.01) -- that term is the
+            # analogue of Rudin's tracking_ang_vel; this one has no legged_gym counterpart and is
+            # weighted 10x heavier. Whether it belongs in a matched-protocol comparison is an open
+            # question for the PPO chapter, see CAMPAIGN_FINDINGS.md 19.11.
             if yawref_hist:
                 yaw_ref = torch.stack(yawref_hist).detach()                        # (T,B)
             else:
@@ -730,6 +764,18 @@ def train(num_iters=1000, steps_per_iter=24,
         loss_gproj_hist_iter.append(float(loss_gproj.detach().cpu()))
         loss_foot_hist_iter.append(float(loss_foot.detach().cpu()))
         loss_clear_hist_iter.append(float(loss_clearance.detach().cpu()))
+        # Yaw diagnostics. loss_yaw is in the objective (yaw_w below) but was never written to
+        # iters.csv, which is why 19.9's finding -- the flat arm being penalised against a fixed
+        # reset heading while carrying a live yaw command -- was invisible in the arm-A run and
+        # had to be found by reading code. mean_abs_yaw_cmd is the commanded yaw-rate magnitude
+        # averaged over the window; under the heading command it should *decay* as robots turn to
+        # face their targets, where a held yaw rate keeps it flat. Same detach-and-sync pattern
+        # as the rows above, so it adds nothing inside the step loop.
+        loss_yaw_hist_iter.append(float(loss_yaw.detach().cpu()))
+        mean_abs_yaw_cmd_iter.append(
+            float(torch.stack(cmd_hist)[..., 2].abs().mean().detach().cpu()) if cmd_hist
+            else float("nan")
+        )
 
         # Mean curriculum difficulty row across robots. This is the same quantity
         # legged_gym logs as extras["episode"]["terrain_level"], so it is the metric
@@ -759,6 +805,8 @@ def train(num_iters=1000, steps_per_iter=24,
                    loss_gproj=loss_gproj_hist_iter[-1],
                    loss_omega=loss_omega_hist_iter[-1],
                    loss_ctrl=loss_ctrl_hist_iter[-1],
+                   loss_yaw=loss_yaw_hist_iter[-1],
+                   mean_abs_yaw_cmd=mean_abs_yaw_cmd_iter[-1],
                    n_falls=float(n_falls_iter), n_timeouts=float(n_timeouts_iter),
                    n_move_up=n_move_up, n_move_down=n_move_down,
                    n_fall_height=float(n_fall_h_iter), n_fall_tilt=float(n_fall_t_iter),
