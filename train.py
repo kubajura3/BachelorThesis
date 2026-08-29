@@ -79,6 +79,17 @@ MODE_CFG = {
     # yaw-rate command decays as the robot turns to face it, instead of being held for the whole
     # episode. Pairs with `blind_omni` to isolate that one change -- see CAMPAIGN_FINDINGS.md 19.10.
     "blind_omni_heading": (dict(terrain_type="flat", cmd_style="rudin", heading_command=True),                    "_blindomnih"),
+    # Command-isolation arms for Exp 2, mirroring what blind_omni did for flat ground. The Exp-2
+    # runs cannot say whether the curriculum collapse comes from the stairs or from the
+    # omnidirectional command set, because terrain_type also picked the command ranges
+    # (CAMPAIGN_FINDINGS.md 19.11). Both styles below are forward-only (vy_min/max and
+    # yaw_min/max are 0): "_fwd" is Song sec 3.2's constant 0.5 m/s, which pairs with the
+    # existing flat `blind` run for a one-variable terrain comparison; "_rand" varies speed over
+    # vx_min..vx_max, which is what sec 6.4/6.5 would actually use.
+    "blind_rudin_fwd":  (dict(terrain_type="rudin", cmd_style="fixed"),                                          "_blindr_fwd"),
+    "blind_rudin_rand": (dict(terrain_type="rudin", cmd_style="rand"),                                           "_blindr_rand"),
+    "hobs_fwd":         (dict(terrain_type="rudin", cmd_style="fixed",
+                              use_perception=True, use_height_obs=True),                                         "_hobs_fwd"),
     "hobs":        (dict(terrain_type="rudin", use_perception=True, use_height_obs=True),                        "_hobs"),
     "hloss":       (dict(terrain_type="rudin", use_perception=True, use_terrain_loss=True),                      "_hloss"),
     "height":      (dict(terrain_type="rudin", use_perception=True, use_height_obs=True, use_terrain_loss=True), "_height"),
