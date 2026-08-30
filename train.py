@@ -61,6 +61,7 @@ from utils_math import (
     moving_average,
     quat_to_rot,
     set_seed,
+    tilt_barrier,
 )
 
 # Directory for all training outputs (curves, metrics, model weights).
@@ -256,6 +257,10 @@ def train(num_iters=1000, steps_per_iter=24,
         # decoupled the two and a run folder is otherwise unable to say which arm it is.
         "cmd_style": resolve_cmd_style(cfg),
         "heading_command": heading_command_active(cfg),
+        # Soft tilt barrier (Step 1c). Recorded for the same reason cmd_style is: without
+        # it a run folder cannot say which arm it is, which is 19.2's lesson.
+        "tilt_w": cfg.tilt_w,
+        "tilt_on": cfg.tilt_on,
         "dt": cfg.dt,
         # One iteration advances physics steps_per_iter times, so this converts an
         # iteration index into simulated seconds per robot -- the x-axis that makes
@@ -290,6 +295,10 @@ def train(num_iters=1000, steps_per_iter=24,
     # gravity projection, foot tracking, terrain clearance (terrain mode only).
     a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01, 0.5, 5.0
     a7 = 3.0
+    # Soft tilt barrier (Step 1c), off unless TILT_W is set. See config.py and
+    # utils_math.tilt_barrier. np.cos rather than math.cos: numpy is already imported here.
+    a8 = float(cfg.tilt_w)
+    cos_tilt_on = float(np.cos(cfg.tilt_on))
     use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
     # True only on the Rudin curriculum grid. Gates the terrain-relative height reference below,
     # so flat / rough runs keep their previous behaviour exactly (and the flat control run stays a
@@ -319,6 +328,8 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_gproj_hist_iter = []
     loss_foot_hist_iter = []
     loss_clear_hist_iter = []
+    loss_tilt_hist_iter = []
+    tilt_frac_active_iter = []
     loss_yaw_hist_iter = []
     mean_abs_yaw_cmd_iter = []
     terrain_level_iter = []
@@ -701,8 +712,25 @@ def train(num_iters=1000, steps_per_iter=24,
             # naturally an order of magnitude larger than the others.
             g_xy_norm = g_xy / cfg.g
             loss_gproj = (g_xy_norm ** 2).sum(dim=-1).mean()
+
+            # Soft tilt barrier (Step 1c) -- the differentiable stand-in for term_penalty,
+            # which only ever reached episodic_reward. Reuses gproj_seq rather than rebuilding
+            # an attitude tensor: env.srbd_q is the only differentiable path to the orientation
+            # (`done` is a bool and env.roll/env.pitch come from Isaac state), and gproj_seq is
+            # already built from it, so this inherits loss_gproj's conventions exactly and adds
+            # no plumbing. utils_math.tilt_barrier carries the geometry.
+            #
+            # Detached at a8 == 0 so that an inert run reaches the old numbers through the old
+            # graph rather than through an extra zero-weighted backward branch. The value is
+            # still computed and logged either way, which is what lets the weight for a real
+            # arm be calibrated from a run that did not use one.
+            loss_tilt, tilt_frac_active = tilt_barrier(
+                gproj_seq if a8 > 0.0 else gproj_seq.detach(), cfg.g, cos_tilt_on
+            )
         else:
             loss_gproj = torch.tensor(0.0, device=device)
+            loss_tilt = torch.tensor(0.0, device=device)
+            tilt_frac_active = torch.tensor(0.0, device=device)
 
         if foot_ref_hist:
             foot_err_seq = torch.stack(foot_ref_hist)  # (T,B,4,3)
@@ -726,6 +754,10 @@ def train(num_iters=1000, steps_per_iter=24,
                 a7*loss_clearance +
                 yaw_w * loss_yaw
                 )
+        # Guarded rather than folded into the sum above: at a8 == 0 the loss expression is
+        # then byte-for-byte the pre-1c one, which is what the inertness reprocheck asserts.
+        if a8 > 0.0:
+            loss = loss + a8 * loss_tilt
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -775,6 +807,12 @@ def train(num_iters=1000, steps_per_iter=24,
         loss_gproj_hist_iter.append(float(loss_gproj.detach().cpu()))
         loss_foot_hist_iter.append(float(loss_foot.detach().cpu()))
         loss_clear_hist_iter.append(float(loss_clearance.detach().cpu()))
+        # Both are needed to read a tilt-barrier arm: loss_tilt gives the term's size (and so
+        # its share of the objective, against the `loss` column), tilt_frac_active gives how
+        # often it fired at all. Without the second, "no effect" and "never active" look the
+        # same in the results.
+        loss_tilt_hist_iter.append(float(loss_tilt.detach().cpu()))
+        tilt_frac_active_iter.append(float(tilt_frac_active.detach().cpu()))
         # Yaw diagnostics. loss_yaw is in the objective (yaw_w below) but was never written to
         # iters.csv, which is why 19.9's finding -- the flat arm being penalised against a fixed
         # reset heading while carrying a live yaw command -- was invisible in the arm-A run and
@@ -814,6 +852,8 @@ def train(num_iters=1000, steps_per_iter=24,
                    # by hand. loss_gproj in particular is the tilt measure the fall analysis turns
                    # on -- see CAMPAIGN_FINDINGS.md sec 18.4.
                    loss_gproj=loss_gproj_hist_iter[-1],
+                   loss_tilt=loss_tilt_hist_iter[-1],
+                   tilt_frac_active=tilt_frac_active_iter[-1],
                    loss_omega=loss_omega_hist_iter[-1],
                    loss_ctrl=loss_ctrl_hist_iter[-1],
                    loss_yaw=loss_yaw_hist_iter[-1],
@@ -867,6 +907,7 @@ def train(num_iters=1000, steps_per_iter=24,
         "loss_omega": np.array(loss_omega_hist_iter, dtype=np.float32),
         "loss_ctrl":  np.array(loss_ctrl_hist_iter,  dtype=np.float32),
         "loss_gproj": np.array(loss_gproj_hist_iter, dtype=np.float32),
+        "loss_tilt":  np.array(loss_tilt_hist_iter,  dtype=np.float32),
         "loss_foot":  np.array(loss_foot_hist_iter,  dtype=np.float32),
         "loss_clear": np.array(loss_clear_hist_iter, dtype=np.float32),
     }

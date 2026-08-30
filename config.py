@@ -86,6 +86,24 @@ DIAG_NO_TERM = _flag("DIAG_NO_TERM", False)
 # DIAG_NO_TERM=1 disables BOTH halves of the rule (height and tilt) so the run keeps
 # falling and the answer becomes readable. Never set either for a real training run.
 
+# ===============================
+# Soft tilt barrier  (env vars: TILT_W=<weight>, TILT_ON=<radians>)
+# ===============================
+TILT_W = float(os.getenv("TILT_W", "0.0"))
+TILT_ON = float(os.getenv("TILT_ON", "0.6"))
+# Step 1(c): the differentiable stand-in for `term_penalty`, which only ever reached
+# episodic_reward and was never backpropagated -- so the objective said nothing about
+# falling over while every termination on the Rudin curriculum was a tilt fall
+# (CAMPAIGN_FINDINGS.md 18.4, 20.8). train.py hinges relu(cos(TILT_ON) - cos(tilt))^2 off
+# the gravity projection it already computes. TILT_W = 0 leaves the loss expression
+# untouched, so a plain run is unchanged, and the term's raw value is still logged --
+# which is what lets a weight be calibrated from a run that did not use one.
+# TILT_ON = 0.6 rad (34 deg) sits above the ~16 deg lean the trained policy walks with, so
+# the term is inert in normal walking rather than a re-weighting of loss_gproj, and below
+# the 0.9 rad (51.6 deg) fall_tilt_thresh, so it engages while righting is still possible.
+# Deliberately env-var-only and NOT in train.py's MODE_CFG: a mode dict is applied after
+# EnvCfg() and would silently win over the variable.
+
 # Whether to only reset at iter=0
 ONLY_ITERATE_NO_RESET = True
 # True: no reset
@@ -269,6 +287,10 @@ class EnvCfg:
     # diagnostic run can move them from the environment (see FALL_H_THRESH / DIAG_NO_TERM).
     fall_height_thresh: float = FALL_H_THRESH   # [m] base height above the ground beneath it
     fall_tilt_thresh: float = 0.9               # [rad] |roll| or |pitch|
+    # Soft tilt barrier (Step 1c); defaults come from the TILT_W / TILT_ON env vars above.
+    # tilt_w = 0 makes the term inert, tilt_on is the tilt angle where it starts pushing.
+    tilt_w: float = TILT_W
+    tilt_on: float = TILT_ON
 
     # Episode length (seconds of sim time). Only used by the Rudin dynamic curriculum: a robot that
     # neither falls nor finishes the episode is reset after this long, which is what lets the

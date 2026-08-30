@@ -100,6 +100,50 @@ def project_gravity_to_body(q_wxyz, g, device):
     return R.t().matmul(g_w)  # (3,)
 
 
+def tilt_barrier(g_body, g, cos_on):
+    """Soft one-sided barrier on body tilt, read off the gravity projection (Step 1c).
+
+    The training objective has no term on the tilt *angle*: ``loss_omega`` penalises
+    roll/pitch angular *velocity*, and ``term_penalty`` only ever reaches the plotted
+    episodic reward, never the backward pass -- while every termination on the Rudin
+    curriculum is a tilt fall (CAMPAIGN_FINDINGS.md 18.4, 20.8). This is that missing
+    term, hinged so it stays silent during normal walking.
+
+    Geometry, so the sign cannot drift: the gravity projection is
+    ``g_body = R(q)^T @ (0, 0, -g)``, whose z component is ``-g * R[2,2]``. R's third row
+    is the world z-axis written in body coordinates, so
+
+        cos_tilt := -g_body_z / g = R[2,2] = 1 - 2*(qx^2 + qy^2) = cos(roll) * cos(pitch)
+
+    -- the cosine of the angle between the body z-axis and world up, independent of yaw.
+    That is the same quantity ``env.step``'s termination rule thresholds, reached without
+    trig and without an ``asin`` singularity. Two consequences worth knowing:
+
+    * It pairs exactly with ``loss_gproj``: for a unit quaternion R's third row is a unit
+      vector, so ``|g_xy / g|^2 + cos_tilt^2 == 1`` per sample. (Unit-length is what
+      ``use_strict_alpha_align`` guarantees by re-normalising ``env.srbd_q`` every step.)
+    * The termination rule is per-axis (``|roll| > thresh`` *or* ``|pitch| > thresh``)
+      while ``cos_tilt`` is the combined tilt, so the barrier is conservative: it fires on
+      roll = pitch = 0.45 rad, which terminates neither axis. That is the safe direction.
+
+    Args:
+        g_body: Gravity projected into the body frame, shape (..., 3) -- e.g. the (T, B, 3)
+            stack ``train.py`` already builds for ``loss_gproj``. Differentiable in, and
+            only in, whatever produced it; detach it to get the value without the graph.
+        g: Gravity magnitude in m/s^2, matching the one used to build ``g_body``.
+        cos_on: ``cos(tilt_on)`` -- the cosine of the tilt angle at which the barrier
+            starts pushing. Larger means it engages earlier (cos is decreasing in tilt).
+
+    Returns:
+        ``(loss, frac_active)``: the mean squared hinge violation, and the fraction of
+        samples past the hinge. ``frac_active`` is detached and is not optional in the
+        logs -- without it a null result cannot be told apart from a term that never fired.
+    """
+    cos_tilt = -g_body[..., 2] / g
+    gap = torch.relu(cos_on - cos_tilt)
+    return (gap ** 2).mean(), (gap.detach() > 0).to(gap.dtype).mean()
+
+
 def quat_from_rpy(roll: float, pitch: float, yaw: float):
     """Euler angles (roll, pitch, yaw in radians) -> ``gymapi.Quat`` (x, y, z, w).
 
