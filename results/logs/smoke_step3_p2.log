@@ -93,14 +93,14 @@ Warp 1.0.2 initialized:
      /home/jakub/.cache/warp/1.0.2
 [perception] collector ready (B=1024, device=cuda, terrain_type=rudin).
 [bench] logging to results/smoke_step3/p2
-  0%|                                                                 | 0/5 [00:00<?, ?it/s]Iter    0 | loss 1.696 | v_body_x +0.10 | |g| 0.321:   0%|            | 0/5 [00:01<?, ?it/s]Iter    0 | loss 1.696 | v_body_x +0.10 | |g| 0.321:  20%|▊   | 1/5 [00:01<00:07,  1.99s/it]Iter    1 | loss 1.612 | v_body_x +0.11 | |g| 0.318:  20%|▊   | 1/5 [00:02<00:07,  1.99s/it]Iter    1 | loss 1.612 | v_body_x +0.11 | |g| 0.318:  40%|█▌  | 2/5 [00:02<00:04,  1.37s/it]Iter    2 | loss 1.550 | v_body_x +0.12 | |g| 0.353:  40%|█▌  | 2/5 [00:03<00:04,  1.37s/it]Iter    2 | loss 1.550 | v_body_x +0.12 | |g| 0.353:  60%|██▍ | 3/5 [00:03<00:02,  1.16s/it]Iter    3 | loss 1.411 | v_body_x +0.14 | |g| 0.385:  60%|██▍ | 3/5 [00:04<00:02,  1.16s/it]Iter    3 | loss 1.411 | v_body_x +0.14 | |g| 0.385:  80%|███▏| 4/5 [00:04<00:01,  1.06s/it]Iter    4 | loss 1.183 | v_body_x +0.17 | |g| 0.396:  80%|███▏| 4/5 [00:05<00:01,  1.06s/it]Iter    4 | loss 1.183 | v_body_x +0.17 | |g| 0.396: 100%|████| 5/5 [00:05<00:00,  1.01s/it]Iter    4 | loss 1.183 | v_body_x +0.17 | |g| 0.396: 100%|████| 5/5 [00:05<00:00,  1.13s/it]
-[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.116,-0.014) v_b=(+0.117,+0.000)
+  0%|                                                                 | 0/5 [00:00<?, ?it/s]Iter    0 | loss 1.708 | v_body_x +0.10 | |g| 0.320:   0%|            | 0/5 [00:02<?, ?it/s]Iter    0 | loss 1.708 | v_body_x +0.10 | |g| 0.320:  20%|▊   | 1/5 [00:02<00:11,  2.89s/it]Iter    1 | loss 1.652 | v_body_x +0.10 | |g| 0.311:  20%|▊   | 1/5 [00:03<00:11,  2.89s/it]Iter    1 | loss 1.652 | v_body_x +0.10 | |g| 0.311:  40%|█▌  | 2/5 [00:03<00:05,  1.74s/it]Iter    2 | loss 1.620 | v_body_x +0.11 | |g| 0.345:  40%|█▌  | 2/5 [00:04<00:05,  1.74s/it]Iter    2 | loss 1.620 | v_body_x +0.11 | |g| 0.345:  60%|██▍ | 3/5 [00:04<00:02,  1.37s/it]Iter    3 | loss 1.515 | v_body_x +0.12 | |g| 0.381:  60%|██▍ | 3/5 [00:05<00:02,  1.37s/it]Iter    3 | loss 1.515 | v_body_x +0.12 | |g| 0.381:  80%|███▏| 4/5 [00:05<00:01,  1.20s/it]Iter    4 | loss 1.313 | v_body_x +0.15 | |g| 0.400:  80%|███▏| 4/5 [00:06<00:01,  1.20s/it]Iter    4 | loss 1.313 | v_body_x +0.15 | |g| 0.400: 100%|████| 5/5 [00:06<00:00,  1.11s/it]Iter    4 | loss 1.313 | v_body_x +0.15 | |g| 0.400: 100%|████| 5/5 [00:06<00:00,  1.33s/it]
+[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.116,-0.014) v_b=(+0.117,-0.000)
 [train] Saved TorchScript: results/smoke_step3/p2/quad_diffsim_srbd_align_multi_robot.pt
 [train] final curriculum: mean level 2.49 (max 5), histogram over rows [177, 185, 158, 152, 172, 180, 0, 0, 0, 0]
-[train]   discrete obstacles   n=  204  mean level 2.48  contacts 3.82  minFootClear +0.013 m
-[train]   rough slope          n=  102  mean level 2.51  contacts 2.84  minFootClear -0.029 m
-[train]   smooth slope         n=  103  mean level 2.41  contacts 3.78  minFootClear +0.013 m
-[train]   stairs down          n=  359  mean level 2.61  contacts 3.78  minFootClear -0.107 m
-[train]   stairs up            n=  256  mean level 2.34  contacts 3.79  minFootClear -0.034 m
-[bench] results/smoke_step3/p2: 1.087 it/s median over 5 timed iters, peak 106 MB
+[train]   discrete obstacles   n=  204  mean level 2.48  contacts 3.80  minFootClear +0.013 m
+[train]   rough slope          n=  102  mean level 2.51  contacts 2.81  minFootClear -0.029 m
+[train]   smooth slope         n=  103  mean level 2.41  contacts 3.76  minFootClear +0.013 m
+[train]   stairs down          n=  359  mean level 2.61  contacts 3.76  minFootClear -0.107 m
+[train]   stairs up            n=  256  mean level 2.34  contacts 3.77  minFootClear -0.031 m
+[bench] results/smoke_step3/p2: 1.069 it/s median over 5 timed iters, peak 112 MB
 [train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).
