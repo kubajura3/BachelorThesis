@@ -7,6 +7,9 @@
 #   ./run_step3.sh phase1    ~45 min  inertness / z-only / z+apex (no action-space change)
 #   ./run_step3.sh wiring    ~40 s    is loss_fq actually in the loss and in the gradient?
 #   ./run_step3.sh probe     ~2 min   weights-0 run -- calibrates FOOT_Q_W / FOOT_RES_W
+#   ./run_step3.sh probe2    ~6 min   recalibration probe, run long enough to reach the level
+#                                     the arms actually settle at (the 100-iter probe does not)
+#   ./run_step3.sh xy        ~16 min  Phase 2 axis comparison: x-only vs x+y, same weight
 #   ./run_step3.sh arms      ~28 min  Phase 2 at the calibrated 5% and 15% weights
 #   ./run_step3.sh detach    ~14 min  FOOT_RES_DETACH=0 ablation
 #   ./run_step3.sh all                seeds -> phase1 -> wiring -> probe -> arms -> detach
@@ -39,6 +42,12 @@ FZA="FOOT_Z_TERRAIN=1 FOOT_APEX_TERRAIN=1"
 # train.py clips the gradient to norm 0.3 before the optimiser sees it.
 WIRE_W="${WIRE_W:-1e6}"
 WIRE_ITERS="${WIRE_ITERS:-25}"
+
+# Axis-comparison stage. 450 rather than 850: the curriculum is fully collapsed by ~300 and
+# flat afterwards (baseline level 0.018 at 400, 0.022 at 849), so the back half of an 850-run
+# adds wall time and no signal. The cost of the cut is stated in the stage body.
+XY_ITERS="${XY_ITERS:-450}"
+PROBE2_ITERS="${PROBE2_ITERS:-350}"
 
 LOG_DIR="$RESULTS/logs"
 mkdir -p "$LOG_DIR" "$OUT" "$OUT2"
@@ -125,6 +134,42 @@ stage_probe() {
   drain_queue
 }
 
+stage_probe2() {
+  # The shipped 100-iteration probe measures the terms over levels 2.49 -> 1.52, but a full arm
+  # spends its last ~600 iterations at level ~0.02. Row-0 risers are 5 cm against the probe's
+  # ~10 cm, and the foothold-quality term is a SQUARED height spread, so the weight calibrated
+  # from that window is fitted to roughly 4x the signal the arm will actually see. 4.5's own
+  # warning ("calibrate in the regime the arm runs in", the 22.3 6x lesson) applies to it.
+  add_run "$OUT2/fhold_probe450"     "MODE=fhold_fwd FOOT_RES=1 $FZA SEED=$SEED ITERS=$PROBE2_ITERS NUM_ENVS=$ENVS"
+  drain_queue
+}
+
+stage_xy() {
+  # Two arms differing in ONE bit: FOOT_RES_Y. Same weight, same seed, same everything else,
+  # so the sagittal-only claim in 2.1 is measured rather than assumed. dim_action is 16 and 20.
+  #
+  # What the cut to $XY_ITERS costs: the per-terrain-type table -- the primary gate -- is
+  # written only at the end of a run (final_state.json), so these arms are read against
+  # 850-iteration Phase 1 tables. That is conservative, not unfair: stairs sit at level 0.000
+  # with max_terrain_level 0 from iteration ~300 onward in every run on disk, so a shorter arm
+  # showing movement is still a real signal, while showing 0.000 is what the long runs show too.
+  local qw rw pd
+  pd="${PROBE_DIR:-}"
+  if [[ -z "$pd" ]]; then
+    if [[ -d "$OUT2/fhold_probe450" ]]; then pd="diag23/fhold_probe450"; else pd="diag23/fhold_probe"; fi
+  fi
+  qw="${FOOT_Q_W_CAL:-$("$PYTHON" collect_step3.py --weight 0.05 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
+  rw="${FOOT_RES_W_CAL:-$("$PYTHON" collect_step3.py --res-weight 0.02 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
+  if [[ -z "${qw:-}" || "$qw" == "0" ]]; then
+    echo "[$(stamp)] SKIP  xy -- no weight available; run './run_step3.sh probe2' first"
+    return
+  fi
+  echo "[$(stamp)] xy: calibrated from $pd -- FOOT_Q_W=$qw (5%)  FOOT_RES_W=$rw (2%)"
+  add_run "$OUT2/fhold_x_q$qw"     "MODE=fhold_fwd FOOT_RES=1 $FZA SEED=$SEED ITERS=$XY_ITERS NUM_ENVS=$ENVS FOOT_Q_W=$qw FOOT_RES_W=$rw"
+  add_run "$OUT2/fhold_xy_q$qw"     "MODE=fhold_fwd FOOT_RES=1 FOOT_RES_Y=1 $FZA SEED=$SEED ITERS=$XY_ITERS NUM_ENVS=$ENVS FOOT_Q_W=$qw FOOT_RES_W=$rw"
+  drain_queue
+}
+
 stage_arms() {
   local qw rw
   qw="${FOOT_Q_W_CAL:-}"; rw="${FOOT_RES_W_CAL:-}"
@@ -166,6 +211,8 @@ case "${1:-}" in
   phase1)  stage_phase1 ;;
   wiring)  stage_wiring ;;
   probe)   stage_probe ;;
+  probe2)  stage_probe2 ;;
+  xy)      stage_xy ;;
   arms)    stage_arms ;;
   detach)  stage_detach ;;
   all)
@@ -178,7 +225,7 @@ case "${1:-}" in
     stage_arms
     stage_detach
     ;;
-  *) sed -n '2,21p' "$0"; exit 1 ;;
+  *) sed -n '2,24p' "$0"; exit 1 ;;
 esac
 
 echo "======================================================================"

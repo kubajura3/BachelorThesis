@@ -385,6 +385,8 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_fq_hist_iter = []
     loss_fres_hist_iter = []
     foot_res_abs_iter = []
+    foot_res_x_abs_iter = []
+    foot_res_y_abs_iter = []
     loss_yaw_hist_iter = []
     mean_abs_yaw_cmd_iter = []
     terrain_level_iter = []
@@ -852,10 +854,19 @@ def train(num_iters=1000, steps_per_iter=24,
             # identically zero and a component mean would report half the real displacement.
             # This is "how far the foothold actually moved", in metres, either way.
             foot_res_abs = res_seq.detach().norm(dim=-1).mean()
+            # Split by axis as well. The norm above answers "did the foothold move";
+            # only these answer "along which axis", and that is the entire question the
+            # FOOT_RES_Y arm exists to ask -- 2.1 predicts y is unusable (the SRBD leg FK
+            # has no lateral DOF), so y_abs collapsing toward 0 while x_abs holds is the
+            # prediction being confirmed, and the norm alone cannot show it.
+            foot_res_x_abs = res_seq.detach()[..., 0].abs().mean()
+            foot_res_y_abs = res_seq.detach()[..., 1].abs().mean()
         else:
             loss_fq = torch.tensor(0.0, device=device)
             loss_fres = torch.tensor(0.0, device=device)
             foot_res_abs = torch.tensor(0.0, device=device)
+            foot_res_x_abs = torch.tensor(0.0, device=device)
+            foot_res_y_abs = torch.tensor(0.0, device=device)
 
         yaw_w = 0.1
         loss = (a1*loss_v +
@@ -941,6 +952,8 @@ def train(num_iters=1000, steps_per_iter=24,
         loss_fq_hist_iter.append(float(loss_fq.detach().cpu()))
         loss_fres_hist_iter.append(float(loss_fres.detach().cpu()))
         foot_res_abs_iter.append(float(foot_res_abs.cpu()))
+        foot_res_x_abs_iter.append(float(foot_res_x_abs.cpu()))
+        foot_res_y_abs_iter.append(float(foot_res_y_abs.cpu()))
         # Yaw diagnostics. loss_yaw is in the objective (yaw_w below) but was never written to
         # iters.csv, which is why 19.9's finding -- the flat arm being penalised against a fixed
         # reset heading while carrying a live yaw command -- was invisible in the arm-A run and
@@ -985,6 +998,8 @@ def train(num_iters=1000, steps_per_iter=24,
                    loss_fq=loss_fq_hist_iter[-1],
                    loss_fres=loss_fres_hist_iter[-1],
                    foot_res_abs_mean=foot_res_abs_iter[-1],
+                   foot_res_x_abs_mean=foot_res_x_abs_iter[-1],
+                   foot_res_y_abs_mean=foot_res_y_abs_iter[-1],
                    loss_omega=loss_omega_hist_iter[-1],
                    loss_ctrl=loss_ctrl_hist_iter[-1],
                    loss_yaw=loss_yaw_hist_iter[-1],

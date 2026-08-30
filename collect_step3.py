@@ -330,12 +330,13 @@ def section_phase2(rd):
     if not os.path.isdir(out):
         return missing("diag23/*", "arms")
     arms = sorted(d for d in os.listdir(out)
-                  if d.startswith("fhold_") and d != "fhold_probe"
+                  if d.startswith("fhold_") and not d.startswith("fhold_probe")
                   and os.path.isfile(os.path.join(out, d, "iters.csv")))
     if not arms:
         return missing("diag23/fhold_*", "arms")
-    print("     %-18s %8s %8s %12s %10s %10s %9s"
-          % ("arm", "Q_W", "detach", "final level", "falls/it", "res_abs", "fq share"))
+    print("     %-18s %5s %8s %6s %11s %8s %8s %8s %8s"
+          % ("arm", "axes", "Q_W", "detach", "final level", "falls/it",
+             "res|x|", "res|y|", "fq share"))
     for a in arms:
         run = "diag23/" + a
         rs, m = rows(rd, run), meta(rd, run)
@@ -343,9 +344,15 @@ def section_phase2(rd):
         fq = last200(rs, "loss_fq")
         ls = last200(rs, "loss")
         share = 100.0 * qw * fq / ls if ls else float("nan")
-        print("     %-18s %8g %8s %12.4f %10.2f %10.4f %8.1f%%"
-              % (a, qw, m.get("foot_res_detach", "?"), final_level(rs),
-                 last200(rs, "n_falls"), last200(rs, "foot_res_abs_mean"), share))
+        # Per-axis columns are absent from runs made before they were logged; fall back to
+        # the xy norm so an older arm still prints a row rather than crashing the section.
+        has_axis = rs and "foot_res_x_abs_mean" in rs[0]
+        xa = last200(rs, "foot_res_x_abs_mean") if has_axis else last200(rs, "foot_res_abs_mean")
+        ya = last200(rs, "foot_res_y_abs_mean") if has_axis else float("nan")
+        print("     %-18s %5s %8g %6s %11.4f %8.2f %8.4f %8s %7.1f%%"
+              % (a, "xy" if m.get("foot_res_y") else "x", qw,
+                 m.get("foot_res_detach", "?"), final_level(rs), last200(rs, "n_falls"),
+                 xa, "%.4f" % ya if ya == ya else "-", share))
     print("\n     Per-terrain-type mean level:")
     fam = ["smooth slope", "rough slope", "stairs up", "stairs down", "discrete obstacles"]
     print("     %-18s" % "arm" + "".join("%14s" % f[:13] for f in fam))
@@ -361,18 +368,30 @@ def section_phase2(rd):
     print("       stairs    -- the actual gate, same as Phase 1.")
     print("       vs detach -- fhold_nodetach vs the same weight says whether the degenerate")
     print("                    minimum of 4.3 is real. Expect res_abs to grow and stairs not to.")
+    print("       res|y|    -- only meaningful on an axes=xy arm. 2.1 predicts it decays toward")
+    print("                    0 while res|x| holds: srbd.foot_positions_srbd has no lateral")
+    print("                    DOF, so loss_foot can only punish a y correction, never reward")
+    print("                    one. y staying large instead would falsify that and is the more")
+    print("                    interesting outcome.")
 
 
 def main():
+    global PROBE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results-dir", default="results")
+    ap.add_argument("--probe-dir", metavar="RUN",
+                    help="probe run to calibrate from, relative to --results-dir "
+                         "(default %s). The shipped probe covers only the curriculum's "
+                         "collapse window, not the level the 850-iteration arms settle at." % PROBE)
     ap.add_argument("--weight", type=float, metavar="FRACTION",
                     help="print only FOOT_Q_W for this share of the loss, then exit")
     ap.add_argument("--res-weight", type=float, metavar="FRACTION",
                     help="print only FOOT_RES_W for this share of the loss, then exit")
     args = ap.parse_args()
     rd = args.results_dir
+    if args.probe_dir:
+        PROBE = args.probe_dir
 
     if args.weight is not None:
         print(calib(rd, args.weight, "loss_fq"))
