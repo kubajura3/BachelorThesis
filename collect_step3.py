@@ -26,8 +26,13 @@ The gates, and why each one is here (see STEP3_FOOTHOLD.md):
                  "did it move at all" column: without it, "the correction did nothing" and "the
                  correction stayed at zero" look identical, which is the mistake 22.4 avoided.
 
-The per-terrain-type table lives only in results/logs/<run>.log, never in iters.csv, so this
-script parses the log for it. That is also why run_step3.sh tees everything.
+The per-terrain-type table is not in iters.csv. It comes from each run's own final_state.json,
+which train.py writes beside it (save_curriculum_snapshot); the run log is only a fallback for
+runs predating that file. Reading the log as the primary source silently dropped the pre-Step-3
+baseline row -- its log is on disk as diag20_blind_rudin_fwd_s0.log, not the run basename this
+script looked for -- and that row is the control every Phase 1 arm is read against. run_step3.sh
+still tees every run: the log carries the startup banner and any traceback, which nothing else
+does.
 """
 
 import argparse
@@ -95,17 +100,36 @@ def final_level(rs):
 
 
 def per_type(results_dir, run):
-    """Per-terrain-family mean level, parsed out of the run log (it is nowhere else)."""
+    """Per-terrain-family stats: {family: {"level":, "clear":, "n":}}.
+
+    Read from the run's own final_state.json. The log parse below is the fallback for runs
+    that predate that file, and it is deliberately no longer the primary source: it keyed on
+    the run basename, so the baseline -- logged as diag20_blind_rudin_fwd_s0.log -- vanished
+    from the one table it is the control for, without saying so. final_state.json also carries
+    min_foot_clear_m, which 3.6 gate 4 reads and the log line only prints when contacts were
+    recorded.
+    """
+    path = os.path.join(results_dir, run, "final_state.json")
+    if os.path.isfile(path):
+        with open(path) as f:
+            fams = json.load(f).get("by_terrain_family") or {}
+        return dict((name, {"level": s.get("mean_terrain_level"),
+                            "clear": s.get("min_foot_clear_m"),
+                            "n": s.get("n_robots")})
+                    for name, s in fams.items())
     log = os.path.join(results_dir, "logs", os.path.basename(run) + ".log")
     if not os.path.isfile(log):
         return {}
-    pat = re.compile(r"^\[train\]\s+(.+?)\s+n=\s*(\d+)\s+mean level\s+([0-9.]+)")
+    pat = re.compile(r"^\[train\]\s+(.+?)\s+n=\s*(\d+)\s+mean level\s+([0-9.]+)"
+                     r"(?:\s+contacts\s+[0-9.]+\s+minFootClear\s+([-+][0-9.]+))?")
     out = {}
     with open(log, errors="ignore") as f:
         for line in f:
             m = pat.match(line.rstrip())
             if m:
-                out[m.group(1).strip()] = float(m.group(3))
+                out[m.group(1).strip()] = {"level": float(m.group(3)),
+                                           "clear": float(m.group(4)) if m.group(4) else None,
+                                           "n": int(m.group(2))}
     return out
 
 
@@ -188,7 +212,7 @@ def section_phase1(rd, bands):
             print("            -> use_perception=True alone moved the run; treat it as a confound.")
 
     # Gate 3: THE read. Per-terrain-type, where smooth slope is the internal control.
-    print("\n     Per-terrain-type mean level -- THE primary gate (from the logs):")
+    print("\n     Per-terrain-type mean level -- THE primary gate (from final_state.json):")
     fam = ["smooth slope", "rough slope", "stairs up", "stairs down", "discrete obstacles"]
     hdr = "     %-18s" % "arm" + "".join("%14s" % f[:13] for f in fam)
     print(hdr)
@@ -196,7 +220,7 @@ def section_phase1(rd, bands):
         d = per_type(rd, run)
         if not d:
             continue
-        print("     %-18s" % name + "".join("%14s" % ("%.2f" % d[f] if f in d else "-")
+        print("     %-18s" % name + "".join("%14s" % ("%.2f" % d[f]["level"] if f in d else "-")
                                             for f in fam))
     for name, run, rs in present:
         if not rs:
@@ -204,13 +228,26 @@ def section_phase1(rd, bands):
         d = per_type(rd, run)
         if not d:
             continue
-        stairs = [d[t] for t in STAIR_TYPES if t in d]
+        stairs = [d[t]["level"] for t in STAIR_TYPES if t in d]
         if stairs:
             moved = max(stairs) > 0.05
             print("     [%s] %s: stairs at %s"
                   % ("PASS" if moved else "null", name,
                      " / ".join("%.2f" % v for v in stairs)))
-    print("     Read `smooth slope` as the control: it should be roughly unchanged. Stairs")
+    # 3.6 gate 4. Baseline is -0.119 m stairs up / -0.118 m stairs down: the foot ends up about
+    # a riser deep inside the step, which is exactly what the terrain-aware landing height exists
+    # to fix. Less negative on the stair rows is the corroborating read on the level table above.
+    print("\n     Worst foot clearance per type (m) -- 3.6 gate 4, less negative is better:")
+    print("     %-18s" % "arm" + "".join("%14s" % f[:13] for f in fam))
+    for name, run in [("pre-Step-3 base", BASE)] + [(n, r) for n, r, _ in present]:
+        d = per_type(rd, run)
+        if not d:
+            continue
+        print("     %-18s" % name + "".join(
+            "%14s" % ("%+.3f" % d[f]["clear"] if f in d and d[f]["clear"] is not None else "-")
+            for f in fam))
+
+    print("\n     Read `smooth slope` as the control: it should be roughly unchanged. Stairs")
     print("     leaving 0.00 while smooth slope holds still is the result.")
 
 
@@ -284,7 +321,7 @@ def section_calibration(rd):
     d = per_type(rd, PROBE)
     if d:
         print("     probe per-type level: "
-              + "  ".join("%s=%.2f" % (k[:12], v) for k, v in sorted(d.items())))
+              + "  ".join("%s=%.2f" % (k[:12], v["level"]) for k, v in sorted(d.items())))
 
 
 def section_phase2(rd):
@@ -315,7 +352,7 @@ def section_phase2(rd):
     for a in arms:
         d = per_type(rd, "diag23/" + a)
         if d:
-            print("     %-18s" % a + "".join("%14s" % ("%.2f" % d[f] if f in d else "-")
+            print("     %-18s" % a + "".join("%14s" % ("%.2f" % d[f]["level"] if f in d else "-")
                                              for f in fam))
     print("\n     How to read it, in order:")
     print("       res_abs   -- did the correction move at all? 0 means the outputs stayed dead;")
