@@ -18,6 +18,8 @@ except Exception:
 
 import torch
 
+from utils_math import swing_apex_z, swing_chord_points
+
 
 class GaitPlanner:
     """Gait scheduling and foot-target generation for a batch of robots.
@@ -112,20 +114,33 @@ class GaitPlanner:
         h = torch.where(v_mag < dead, torch.full((B,), 0.5 * h0, device=dev), h)
         self.swing_height_B = h
 
-    @torch.no_grad()
     def _swing_parabola(self, p0, pm, p1, s):
         """Quadratic interpolation through (p0 at s=0, pm at s=0.5, p1 at s=1).
 
         Used for the swing-foot trajectory: start at the liftoff point, apex at
         the midpoint raised by the swing height, land at the touchdown target.
         All arguments broadcast; ``s`` is the swing progress in [0, 1].
+
+        Deliberately **not** ``@torch.no_grad()`` (it was, before Step 3). The
+        foothold residual reaches the training objective only through ``p1``, so
+        under the old decorator the correction arrived as a constant and its
+        policy outputs received no gradient at all. Removing it costs nothing
+        when nothing upstream carries a graph: with the Step 3 flags off, ``p0``
+        is detached, ``p1`` comes from ``last_contact_z`` and the Isaac-side
+        Raibert point, and the arithmetic -- hence every value -- is unchanged.
+
+        Worth knowing before tuning: ``pm`` is displaced from the chord midpoint
+        only in z, so ``b_x = 0``, ``p_swing_x = (p1_x - p0_x)*s^2 + p0_x`` and
+        ``d p_swing_x / d p1_x = s^2``. The residual has no authority at liftoff
+        and full authority at touchdown, which is the profile it should have.
         """
         c = p0
         b = 4*(pm - (p0 + p1)/2.0)
         a = p1 - p0 - b
         return a*(s**2) + b*s + c
 
-    def _update_foot_targets_from_command(self, phases, p_foot_now, return_vref: bool = False):
+    def _update_foot_targets_from_command(self, phases, p_foot_now, return_vref: bool = False,
+                                          foothold_res=None):
         """Compute per-foot PD targets and the stance mask for the current phase.
 
         The main foot-trajectory entry point, called once per control step.
@@ -139,9 +154,20 @@ class GaitPlanner:
             p_foot_now: (B, 4, 3) current world-frame foot positions.
             return_vref: Also return the (currently zero) foot reference
                 velocity, matching the training loop's call signature.
+            foothold_res: (B, 4, 2) per-leg foothold correction in the **body**
+                frame, metres, or None (Step 3). Rotated into the world frame by
+                the base yaw alongside the Raibert feed-forward term, so it means
+                "shift this foothold forward/back relative to where the robot is
+                facing" rather than a compass direction.
 
         Returns:
             (p_foot_target (B,4,3), stance_mask (B,4,1)[, vref (B,4,3)]).
+
+        Also publishes ``self.foothold_plan_xy`` (B,4,2), the planned foothold in
+        world coordinates. Unlike ``self.swing_progress`` this one is **not**
+        detached: it is the gradient path the foothold-quality loss samples the
+        terrain along. It is the plan the returned target was built from, so a
+        caller reading it gets exactly what the swing is aiming at.
         """
         dev, cfg, B = self.device, self.cfg, self.B
 
@@ -204,7 +230,21 @@ class GaitPlanner:
         p_stance[..., 2]   = self.last_contact_z
 
         # ---------- 5) SWING branch: quadratic parabola ----------
-        _, p_land_xy_world = self._raibert_touchdown_world(phases)   # (B,4,2)
+        # Step 3: the planned foothold, Raibert plus the policy's per-leg correction. Published
+        # attached, because it is the gradient path the foothold-quality loss samples along.
+        _, self.foothold_plan_xy = self._raibert_touchdown_world(phases, foothold_res=foothold_res)
+
+        # The *target* the swing (and so loss_foot) is built from drops that graph by default:
+        # with it attached, loss_foot has a degenerate minimum -- drag the target onto the foot
+        # instead of moving the foot. See STEP3_FOOTHOLD.md 4.3.
+        #
+        # Detaching the sum is exactly equivalent to summing with a detached residual, because
+        # the Raibert term itself is already grad-free (it is built from Isaac's base_pos and
+        # yaw). Same floats either way, so this is one Raibert evaluation per step rather than
+        # two, and there is no second code path to keep in step with the first.
+        p_land_xy_world = self.foothold_plan_xy
+        if foothold_res is not None and getattr(cfg, "foot_res_detach", True):
+            p_land_xy_world = p_land_xy_world.detach()
 
         u = self._phase_u(phases)                                    # (B,4)
         beta4 = beta_B.view(B, 1).expand(B, 4)
@@ -221,10 +261,22 @@ class GaitPlanner:
         # Start point p0 (world)
         p0 = self.last_liftoff_xyz.detach().clone()                     # (B,4,3)
 
-        # End point p1 (world)
-        p1 = torch.zeros_like(p0)
-        p1[..., 0:2] = p_land_xy_world
-        p1[..., 2]   = self.last_contact_z
+        # End point p1 (world). Landing height: `last_contact_z` is the height this leg last
+        # touched down at, which is the correct proprioceptive estimate for a blind robot and
+        # stale by exactly one riser on every stair step (CAMPAIGN_FINDINGS.md 22.6). Under
+        # cfg.foot_z_terrain it becomes the actual ground under the landing point.
+        #
+        # smooth=False on purpose: this is a target *value*, and the blurred field is a 0.2 m
+        # Gaussian against a 0.31 m tread, which would aim the foot halfway between tread and
+        # riser near every edge. The blurred field is for gradients (loss_clear), not targets.
+        if getattr(cfg, "foot_z_terrain", False):
+            land_z = self.env.terrain_height_legs(p_land_xy_world, smooth=False)   # (B,4)
+        else:
+            land_z = self.last_contact_z                                           # (B,4)
+        # torch.cat rather than zeros_like + in-place slice writes: p_land_xy_world carries a
+        # graph once the foothold residual is on, and in-place writes into an aliased tensor
+        # are what the liftoff cache above already had to work around.
+        p1 = torch.cat([p_land_xy_world, land_z.unsqueeze(-1)], dim=-1)  # (B,4,3)
 
         # Mid point pm (world)
         h_env = getattr(
@@ -234,8 +286,18 @@ class GaitPlanner:
         )                                                               # (B,)
         h_leg = h_env.view(B, 1).expand(-1, 4)                          # (B,4)
 
-        pm = 0.5 * (p0 + p1)
-        pm[..., 2] = 0.5 * (p0[..., 2] + p1[..., 2]) + h_leg
+        # Apex: the chord midpoint raised by the swing height, except that on a rising step the
+        # ground between liftoff and touchdown sits above both endpoints and the parabola's s^2
+        # base sags into the riser. utils_math.swing_apex_z keeps the old midpoint as a lower
+        # bound, so this can only raise the apex and is bit-identical on flat ground.
+        if getattr(cfg, "foot_apex_terrain", False):
+            chord_xy = swing_chord_points(p0[..., 0:2], p1[..., 0:2],
+                                          int(getattr(cfg, "foot_apex_n", 5)))      # (B,4,n,2)
+            chord_z = self.env.terrain_height_legs(chord_xy, smooth=False)           # (B,4,n)
+            pm_z = swing_apex_z(chord_z, p0[..., 2], p1[..., 2], h_leg)              # (B,4)
+        else:
+            pm_z = 0.5 * (p0[..., 2] + p1[..., 2]) + h_leg
+        pm = torch.cat([0.5 * (p0[..., 0:2] + p1[..., 0:2]), pm_z.unsqueeze(-1)], dim=-1)
 
         # Quadratic parabola
         p_swing = self._swing_parabola(p0, pm, p1, s)                  # (B,4,3)
@@ -256,7 +318,7 @@ class GaitPlanner:
             return p_foot_target, stance_mask, v_foot_ref_world
         return p_foot_target, stance_mask
 
-    def _raibert_touchdown_world(self, phases: torch.Tensor):
+    def _raibert_touchdown_world(self, phases: torch.Tensor, foothold_res=None):
         """Raibert-style touchdown targets in the world frame.
 
         The full textbook touchdown heuristic is
@@ -272,6 +334,10 @@ class GaitPlanner:
 
         Args:
             phases: (B, 4) absolute leg phases in radians.
+            foothold_res: (B, 4, 2) body-frame per-leg correction in metres, or
+                None (Step 3). Added after the same body->world yaw rotation the
+                commanded velocity gets, which is the whole reason it is applied
+                here rather than at the call site: R_yaw is already built.
 
         Returns:
             (p_hip_xy_world (B,4,2), p_land_xy_world (B,4,2)).
@@ -315,6 +381,12 @@ class GaitPlanner:
         term_ff = 0.5 * v_des_world.view(B,1,2) * T_stance.view(B,1,1)
 
         p_land_xy_world = p_hip_xy_world + term_ff
+
+        # Step 3 foothold residual, body -> world through the same rotation as v_des.
+        if foothold_res is not None:
+            res_world = torch.einsum("bij,bnj->bni", R_yaw, foothold_res)   # (B,4,2)
+            p_land_xy_world = p_land_xy_world + res_world
+
         return p_hip_xy_world, p_land_xy_world
 
 

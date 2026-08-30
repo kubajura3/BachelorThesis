@@ -144,6 +144,132 @@ def tilt_barrier(g_body, g, cos_on):
     return (gap ** 2).mean(), (gap.detach() > 0).to(gap.dtype).mean()
 
 
+# ---------------------------------------------------------------------------
+# Perceptive foothold (Step 3). Pure tensor maths, no Isaac / env dependency, so
+# tests/test_foothold.py runs on a laptop with neither isaacgym nor a GPU -- the
+# same split that made tests/test_tilt_barrier.py possible for Step 1(c).
+# See STEP3_FOOTHOLD.md for why each of these exists.
+# ---------------------------------------------------------------------------
+
+def swing_chord_points(p0_xy, p1_xy, n):
+    """Sample points along the straight chord from liftoff to touchdown.
+
+    The swing arc's apex has to clear whatever is *under* the swing, not just the
+    two endpoints: on a rising step the parabola's ``s^2`` base sags below the
+    straight line and clips the riser even when the landing target is correct.
+    These are the points ``swing_apex_z`` takes its maximum over.
+
+    Endpoints are included, so ``n = 2`` degenerates to (p0, p1) and reproduces
+    the endpoint-only behaviour exactly.
+
+    Args:
+        p0_xy: (..., 2) chord start, world frame.
+        p1_xy: (..., 2) chord end, world frame.
+        n: Number of samples along the chord, >= 2.
+
+    Returns:
+        (..., n, 2) points, ``p0`` first and ``p1`` last.
+    """
+    assert n >= 2, "need at least the two endpoints"
+    # arange/(n-1) rather than torch.linspace: linspace with tensor endpoints is
+    # newer than the torch 1.13 the training box runs, and this broadcasts anyway.
+    t = torch.arange(n, dtype=p0_xy.dtype, device=p0_xy.device) / float(n - 1)  # (n,)
+    t = t.view(*([1] * (p0_xy.dim() - 1)), n, 1)                                # (...,n,1)
+    a = p0_xy.unsqueeze(-2)                                                     # (...,1,2)
+    b = p1_xy.unsqueeze(-2)
+    # a*(1-t) + b*t, not the algebraically equal a + (b-a)*t: only this form is
+    # exact at both ends in floating point (t=1 gives a*0 + b*1 == b). The other
+    # misses the endpoints by an ulp or two in ~97% of random draws, which would
+    # make "the chord starts at liftoff and ends at touchdown" merely approximate
+    # and quietly weaken the inertness guarantee the apex rests on.
+    return a * (1.0 - t) + b * t                                                # (...,n,2)
+
+
+def swing_apex_z(chord_z, p0_z, p1_z, h):
+    """Apex height for the swing parabola: clear the terrain under the chord.
+
+    ``gait._update_foot_targets_from_command`` puts the parabola's mid control
+    point at ``0.5*(p0_z + p1_z) + h`` -- the chord midpoint raised by the swing
+    height. That is correct on flat ground and wrong over a step, where the
+    ground between liftoff and touchdown rises above both endpoints.
+
+    The old midpoint is kept as a **lower bound**, so this can only ever raise
+    the apex, never drop it below the arc the robot already flies. With flat
+    terrain level with the endpoints the ``max`` selects the midpoint term and
+    the result is bit-identical to the pre-Step-3 formula -- which is what
+    ``tests/test_foothold.py`` asserts, and what makes the flag inert when off.
+
+    Args:
+        chord_z: (..., n) terrain heights sampled along the chord.
+        p0_z: (...) liftoff height, world frame.
+        p1_z: (...) touchdown height, world frame.
+        h: (...) swing height above the reference.
+
+    Returns:
+        (...) apex z for the parabola's mid control point.
+    """
+    midpoint = 0.5 * (p0_z + p1_z)
+    ground = chord_z.max(dim=-1).values
+    return torch.maximum(ground, midpoint) + h
+
+
+def ring_points(xy, radius, k):
+    """``k`` points on a circle of ``radius`` around each ``xy``.
+
+    The probe ``foothold_quality`` reads the terrain at. A ring rather than a
+    single sample because the question is "is the ground around this foothold
+    flat?", which no point lookup can answer -- and because a spread over a ring
+    stays informative on the *exact* heightfield, where a single point's bilinear
+    gradient is zero on a tread and a spike at a riser.
+
+    Args:
+        xy: (..., 2) ring centres, world frame.
+        radius: Ring radius in metres.
+        k: Number of points on the ring, >= 1.
+
+    Returns:
+        (..., k, 2) points. Angles start at 0 and are evenly spaced, so the ring
+        is deterministic and the same every call.
+    """
+    assert k >= 1, "need at least one ring point"
+    ang = torch.arange(k, dtype=xy.dtype, device=xy.device) * (2.0 * math.pi / k)  # (k,)
+    off = torch.stack([torch.cos(ang), torch.sin(ang)], dim=-1) * float(radius)    # (k,2)
+    return xy.unsqueeze(-2) + off.view(*([1] * (xy.dim() - 1)), k, 2)              # (...,k,2)
+
+
+def foothold_quality(z_ring, z_centre):
+    """Terrain-roughness cost at a planned foothold: spread of the ring about its centre.
+
+    Flat ground -> every ring point sits at the centre's height -> ~0. A tread
+    edge or a hole -> part of the ring is a riser away -> large. This is the
+    differentiable analogue of the foothold score maps in Fankhauser et al.
+    (ICRA 2018) and TAMOLS (Jenelten et al., T-RO 2022).
+
+    It is the **only** term that pushes the foothold residual toward *good*
+    ground rather than merely reachable ground: the L2 prior only shrinks the
+    correction, and ``loss_foot``'s residual path is detached by default (see
+    STEP3_FOOTHOLD.md 4.3). Differentiable in the sampled heights, and through
+    them -- via ``TerrainHeightSampler.sample_points`` -- in the foothold xy.
+
+    **Sample it from the blurred field** (``smooth=True``, which is what
+    ``cfg.foot_q_smooth`` defaults to). The spread is a difference between ring
+    points, so its *value* detects an edge on the exact heightfield too -- but
+    its *gradient* does not: bilinear ``grid_sample`` is piecewise-constant, so
+    on the exact field the derivative is zero unless a ring point happens to lie
+    in a riser cell. Measured across a 0.15 m step, the exact field gives a
+    nonzero gradient at 6 of 21 foothold positions and exactly zero *on* the
+    edge; the blurred field gives one at 21 of 21. See ``config.FOOT_Q_SMOOTH``.
+
+    Args:
+        z_ring: (..., k) terrain heights on the ring.
+        z_centre: (...) terrain height at the ring centre.
+
+    Returns:
+        (...) mean squared height deviation over the ring.
+    """
+    return ((z_ring - z_centre.unsqueeze(-1)) ** 2).mean(dim=-1)
+
+
 def quat_from_rpy(roll: float, pitch: float, yaw: float):
     """Euler angles (roll, pitch, yaw in radians) -> ``gymapi.Quat`` (x, y, z, w).
 

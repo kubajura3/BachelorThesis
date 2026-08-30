@@ -104,6 +104,65 @@ TILT_ON = float(os.getenv("TILT_ON", "0.6"))
 # Deliberately env-var-only and NOT in train.py's MODE_CFG: a mode dict is applied after
 # EnvCfg() and would silently win over the variable.
 
+# ===============================
+# Perceptive foothold  (Step 3) -- see STEP3_FOOTHOLD.md
+# ===============================
+# Phase 1: where the swing foot is aimed. gait.py lands it at `last_contact_z`, the height
+# that leg last touched down at, which on stairs is stale by exactly one riser every step --
+# and row 0 of the Rudin curriculum is already 5 cm risers on a 0.31 m tread
+# (terrain.py make_terrain). CAMPAIGN_FINDINGS.md 22.6 is the measurement behind this.
+# Both need use_perception=True: env.terrain_height_diff asserts on it.
+FOOT_Z_TERRAIN = _flag("FOOT_Z_TERRAIN", False)      # land at the terrain, not last_contact_z
+FOOT_APEX_TERRAIN = _flag("FOOT_APEX_TERRAIN", False)  # clear max(terrain) under the swing chord
+FOOT_APEX_N = int(os.getenv("FOOT_APEX_N", "5"))     # chord samples for the apex (>=2)
+
+# Phase 2: the policy's per-leg foothold correction, appended to the 12 joint offsets.
+# FOOT_RES=1 adds 4 outputs (per-leg sagittal dx); FOOT_RES_Y additionally adds 4 lateral
+# outputs and is off because srbd.foot_positions_srbd has no lateral DOF (off_body y is
+# identically 0), so loss_foot cannot reward a y correction -- only punish it.
+FOOT_RES = _flag("FOOT_RES", False)
+FOOT_RES_Y = _flag("FOOT_RES_Y", False)
+# Correction bound, metres. 0.10 m is the joint-side ceiling: delta_q_scale12 gives +-0.30 rad
+# on thigh and calf, worth roughly 0.10 m of sagittal foot travel at the h0 = 0.35 m stance.
+# Check it against the stride too -- the Raibert feed-forward term is only ~0.078 m at
+# step_freq 1.6 Hz, so this much correction can cancel the step. If vx falls while loss_fq
+# improves, the policy is scoring footholds by not walking: cut this to 0.06 before touching
+# the weights.
+FOOT_RES_MAX = float(os.getenv("FOOT_RES_MAX", "0.10"))
+# Detach the residual inside loss_foot's target. ON by default, and it is a guard rather than
+# a tuning knob: with the target differentiable in the correction, loss_foot has a degenerate
+# minimum -- drag the target to wherever the foot already is instead of moving the foot.
+# Detaching removes that channel by construction. The cost is that the residual is then shaped
+# by loss_fq and its prior only, not by downstream outcome, which 22.5 showed is a 48 ms
+# window and empirically weak anyway. FOOT_RES_DETACH=0 measures whether the degenerate
+# solution actually appears.
+FOOT_RES_DETACH = _flag("FOOT_RES_DETACH", True)
+# Foothold-quality probe: ring radius (m) and point count. 0.06 m is a foot plus margin
+# against a 0.31 m tread.
+FOOT_Q_RADIUS = float(os.getenv("FOOT_Q_RADIUS", "0.06"))
+FOOT_Q_RING = int(os.getenv("FOOT_Q_RING", "8"))
+# Sample the quality ring from the *blurred* heightfield. ON, like the clearance loss.
+#
+# The tempting argument for the exact field is that the ring *spread* is a difference between
+# samples, so it stays large near an edge even where a single point's bilinear gradient is
+# flat. That is true of the cost's VALUE and false of its GRADIENT, which is the half that
+# trains the residual. Measured on a 0.15 m riser, sweeping the foothold +-0.30 m across it in
+# 0.03 m steps (ring r = 0.06, k = 8):
+#
+#     exact field    nonzero d(cost)/dx at  6 of 21 positions -- and exactly 0 ON the edge
+#     blurred field  nonzero d(cost)/dx at 21 of 21, smooth, and correctly signed either side
+#
+# On the exact field a foothold sitting on flat tread a fifth of a metre from a riser gets no
+# signal at all to move, because every ring point lands inside a cell whose bilinear gradient
+# is zero. A smeared but everywhere-differentiable potential beats a sharp one that is almost
+# everywhere flat. The 0.2 m sigma is broad against a 0.31 m tread, which is the real cost of
+# this choice -- FOOT_Q_SMOOTH=0 runs the exact-field arm if it is worth measuring.
+FOOT_Q_SMOOTH = _flag("FOOT_Q_SMOOTH", True)
+# Loss weights, both 0 (inert) by default. Calibrate them from a weights-0 probe run the way
+# 22.3 calibrated TILT_W -- loss_fq / loss_fres are logged even at weight 0 for exactly that.
+FOOT_Q_W = float(os.getenv("FOOT_Q_W", "0.0"))
+FOOT_RES_W = float(os.getenv("FOOT_RES_W", "0.0"))
+
 # Whether to only reset at iter=0
 ONLY_ITERATE_NO_RESET = True
 # True: no reset
@@ -291,6 +350,21 @@ class EnvCfg:
     # tilt_w = 0 makes the term inert, tilt_on is the tilt angle where it starts pushing.
     tilt_w: float = TILT_W
     tilt_on: float = TILT_ON
+
+    # Perceptive foothold (Step 3); defaults come from the FOOT_* env vars above. Every one is
+    # off/zero by default, so a run that sets none of them reproduces the pre-Step-3 numbers.
+    foot_z_terrain: bool = FOOT_Z_TERRAIN
+    foot_apex_terrain: bool = FOOT_APEX_TERRAIN
+    foot_apex_n: int = FOOT_APEX_N
+    foot_res: bool = FOOT_RES
+    foot_res_y: bool = FOOT_RES_Y
+    foot_res_max: float = FOOT_RES_MAX
+    foot_res_detach: bool = FOOT_RES_DETACH
+    foot_q_radius: float = FOOT_Q_RADIUS
+    foot_q_ring: int = FOOT_Q_RING
+    foot_q_smooth: bool = FOOT_Q_SMOOTH
+    foot_q_w: float = FOOT_Q_W
+    foot_res_w: float = FOOT_RES_W
 
     # Episode length (seconds of sim time). Only used by the Rudin dynamic curriculum: a robot that
     # neither falls nor finishes the episode is reset after this long, which is what lets the

@@ -58,8 +58,10 @@ from env import RealQuadEnv, heading_command_active, resolve_cmd_style
 from policy import Policy, VisionPolicy
 from terrain import terrain_family_by_column
 from utils_math import (
+    foothold_quality,
     moving_average,
     quat_to_rot,
+    ring_points,
     set_seed,
     tilt_barrier,
 )
@@ -91,6 +93,15 @@ MODE_CFG = {
     "blind_rudin_rand": (dict(terrain_type="rudin", cmd_style="rand"),                                           "_blindr_rand"),
     "hobs_fwd":         (dict(terrain_type="rudin", cmd_style="fixed",
                               use_perception=True, use_height_obs=True),                                         "_hobs_fwd"),
+    # Step 3 (STEP3_FOOTHOLD.md). Phase 1: terrain-aware swing target, no action-space change,
+    # driven entirely by the FOOT_Z_TERRAIN / FOOT_APEX_TERRAIN env vars so one mode covers the
+    # inertness, z-only and z+apex arms. use_terrain_loss stays off on purpose -- the clearance
+    # term would move at the same time and cost the phase its one-variable reading.
+    "fz_fwd":      (dict(terrain_type="rudin", cmd_style="fixed", use_perception=True),                          "_fz_fwd"),
+    # Phase 2: adds the height scan (the residual has to see the terrain) on top. The residual
+    # itself is FOOT_RES=1, and its weights are FOOT_Q_W / FOOT_RES_W.
+    "fhold_fwd":   (dict(terrain_type="rudin", cmd_style="fixed",
+                         use_perception=True, use_height_obs=True),                                              "_fhold_fwd"),
     "hobs":        (dict(terrain_type="rudin", use_perception=True, use_height_obs=True),                        "_hobs"),
     "hloss":       (dict(terrain_type="rudin", use_perception=True, use_terrain_loss=True),                      "_hloss"),
     "height":      (dict(terrain_type="rudin", use_perception=True, use_height_obs=True, use_terrain_loss=True), "_height"),
@@ -245,6 +256,26 @@ def train(num_iters=1000, steps_per_iter=24,
     env = RealQuadEnv(cfg, device=device)
     B = env.B
 
+    # Step 3: the policy also emits a per-leg foothold correction. n_res = 0 unless FOOT_RES is
+    # set, and the n_res == 0 path in the rollout never slices the action, so a default run is
+    # unchanged. y is separate and off by default: srbd.foot_positions_srbd has no lateral DOF
+    # (off_body y is identically 0), so loss_foot can only punish a y correction, never reward
+    # one. Resolved here, above meta.json, so the recorded dim_action is the one actually used.
+    n_res = (4 + (4 if cfg.foot_res_y else 0)) if cfg.foot_res else 0
+    # Every Step 3 switch reads the terrain through env.terrain_height_diff, which asserts on
+    # cfg.use_perception. Caught here, by name, rather than as a bare assertion 24 steps into
+    # the first rollout -- the flags are env vars and pairing one with a blind MODE is the
+    # obvious mistake to make.
+    _foot_flags = [n for n, on in (("FOOT_Z_TERRAIN", cfg.foot_z_terrain),
+                                   ("FOOT_APEX_TERRAIN", cfg.foot_apex_terrain),
+                                   ("FOOT_RES", cfg.foot_res)) if on]
+    if _foot_flags and not getattr(cfg, "use_perception", False):
+        raise SystemExit(
+            "%s set but MODE=%r has use_perception=False. The terrain lookup needs the height "
+            "field -- use MODE=fz_fwd (phase 1) or MODE=fhold_fwd (phase 2)."
+            % (" / ".join(_foot_flags), mode))
+    dim_action = 12 + n_res
+
     # Per-run measurement folder. Disabled (all no-ops) when run_dir is None.
     bench = BenchLog(run_dir, meta={
         "mode": mode, "seed": seed, "num_envs": B, "iters": num_iters,
@@ -261,6 +292,22 @@ def train(num_iters=1000, steps_per_iter=24,
         # it a run folder cannot say which arm it is, which is 19.2's lesson.
         "tilt_w": cfg.tilt_w,
         "tilt_on": cfg.tilt_on,
+        # Perceptive foothold (Step 3), same reason as tilt_w above: a run folder must be able
+        # to say which arm it is. dim_action is here because it is no longer always 12 -- the
+        # play/eval scripts read it back to size the policy for a checkpoint.
+        "foot_z_terrain": cfg.foot_z_terrain,
+        "foot_apex_terrain": cfg.foot_apex_terrain,
+        "foot_apex_n": cfg.foot_apex_n,
+        "foot_res": cfg.foot_res,
+        "foot_res_y": cfg.foot_res_y,
+        "foot_res_max": cfg.foot_res_max,
+        "foot_res_detach": cfg.foot_res_detach,
+        "foot_q_w": cfg.foot_q_w,
+        "foot_res_w": cfg.foot_res_w,
+        "foot_q_radius": cfg.foot_q_radius,
+        "foot_q_ring": cfg.foot_q_ring,
+        "foot_q_smooth": cfg.foot_q_smooth,
+        "dim_action": dim_action,
         "dt": cfg.dt,
         # One iteration advances physics steps_per_iter times, so this converts an
         # iteration index into simulated seconds per robot -- the x-axis that makes
@@ -269,9 +316,9 @@ def train(num_iters=1000, steps_per_iter=24,
         "device": str(device),
     })
     if depth_policy:
-        model = VisionPolicy(dim_obs=env.obs_dim, dim_action=12).to(device)
+        model = VisionPolicy(dim_obs=env.obs_dim, dim_action=dim_action).to(device)
     else:
-        model = Policy(dim_obs=env.obs_dim, dim_action=12).to(device)
+        model = Policy(dim_obs=env.obs_dim, dim_action=dim_action).to(device)
 
     def policy_act(s, hx):
         """One policy call; in depth mode also captures the camera this step.
@@ -299,6 +346,11 @@ def train(num_iters=1000, steps_per_iter=24,
     # utils_math.tilt_barrier. np.cos rather than math.cos: numpy is already imported here.
     a8 = float(cfg.tilt_w)
     cos_tilt_on = float(np.cos(cfg.tilt_on))
+    # Perceptive foothold (Step 3), both 0 unless set. a9 buys good ground, a10 keeps Raibert as
+    # the prior. Calibrate from a weights-0 probe the way 22.3 calibrated a8 -- loss_fq and
+    # loss_fres are logged even at weight 0 for exactly that.
+    a9 = float(cfg.foot_q_w)
+    a10 = float(cfg.foot_res_w)
     use_terrain_loss = getattr(cfg, "use_terrain_loss", False)
     # True only on the Rudin curriculum grid. Gates the terrain-relative height reference below,
     # so flat / rough runs keep their previous behaviour exactly (and the flat control run stays a
@@ -330,6 +382,9 @@ def train(num_iters=1000, steps_per_iter=24,
     loss_clear_hist_iter = []
     loss_tilt_hist_iter = []
     tilt_frac_active_iter = []
+    loss_fq_hist_iter = []
+    loss_fres_hist_iter = []
+    foot_res_abs_iter = []
     loss_yaw_hist_iter = []
     mean_abs_yaw_cmd_iter = []
     terrain_level_iter = []
@@ -371,6 +426,8 @@ def train(num_iters=1000, steps_per_iter=24,
         omega_hist, gproj_hist = [], []
         foot_ref_hist = []
         clearance_hist = []
+        fq_hist = []            # foothold-quality cost per step (Step 3)
+        res_hist = []           # foothold residual per step, for its L2 prior and diagnostics
         cmd_hist = []       # per-step high-level command [vx_cmd, vy_cmd, yaw_cmd]
         yawref_hist = []    # per-step commanded yaw reference (terrain only; see loss_yaw)
 
@@ -394,7 +451,7 @@ def train(num_iters=1000, steps_per_iter=24,
         foot_clear_sum = 0.0     # sum over steps of the batch-mean lowest-foot clearance
         foot_clear_min = None    # running min over steps x batch
 
-        a_prev = torch.zeros(B, 12, device=device)
+        a_prev = torch.zeros(B, dim_action, device=device)
 
         # Inner loop: multiple simulation and training steps per iter
         for t in range(steps_per_iter):
@@ -405,7 +462,7 @@ def train(num_iters=1000, steps_per_iter=24,
             # RNN / action_hold logic (keep as is)
             if PURE_PAPER_MODE:
                 if (t % cfg.action_hold) == 0:
-                    a, hx = policy_act(s, hx)   # (B,12)
+                    a, hx = policy_act(s, hx)   # (B, dim_action)
                     a_prev = a
                     hx_hold = hx.detach() if hx is not None else None
                 else:
@@ -422,8 +479,26 @@ def train(num_iters=1000, steps_per_iter=24,
                     a = a_prev
                     hx = hx_hold
 
+            # ------------------- Step 3: split off the foothold correction ----------------
+            # env.step takes exactly 12 joint offsets and applies tanh * delta_q_scale12 to
+            # them; the residual has its own squashing and its own scale, so it must never
+            # enter there. When n_res == 0 the action is passed straight through untouched --
+            # not sliced -- so a default run is byte-for-byte the pre-Step-3 one.
+            if n_res:
+                a_joint = a[:, :12]
+                # Body frame, metres. Always (B,4,2): the y column is zeros when foot_res_y is
+                # off, so the planner has one shape to handle and the zeros contribute nothing.
+                res_xy = torch.tanh(a[:, 12:]) * float(cfg.foot_res_max)
+                if cfg.foot_res_y:
+                    foot_res = res_xy.view(B, 4, 2)
+                else:
+                    foot_res = torch.stack([res_xy, torch.zeros_like(res_xy)], dim=-1)  # (B,4,2)
+            else:
+                a_joint = a
+                foot_res = None
+
             # ------------------- Isaac Gym simulation, one control step -------------------
-            _, extra, q_err, qref = env.step(a)
+            _, extra, q_err, qref = env.step(a_joint)
 
             # ------------------- gait plan for this step -------------------
             p_foot = env.foot_positions()                     # (B,4,3)
@@ -436,7 +511,7 @@ def train(num_iters=1000, steps_per_iter=24,
             phases = phase_offsets + env.phase.view(B,1)      # (B,4)
             # Stance/swing masks + foot targets from the gait planner (Raibert touchdown).
             pref, stance_mask, vref_foot = env.gait._update_foot_targets_from_command(
-                phases, p_foot, return_vref=True
+                phases, p_foot, return_vref=True, foothold_res=foot_res
             )
             swing_mask  = 1.0 - stance_mask                   # (B,4,1)
 
@@ -513,7 +588,10 @@ def train(num_iters=1000, steps_per_iter=24,
                 yawref_hist.append(
                     env.last_reset_yaw + env.cmd_rand[:, 2] * env.ep_len_buf.to(env.cmd_rand.dtype) * cfg.dt
                 )
-            ureg_hist.append(a.clone())
+            # a_joint, not a: loss_ctrl is the paper's control-effort term over the 12 joint
+            # offsets. Feeding it the foothold outputs too would silently change its magnitude
+            # and break every comparison against a run already on disk.
+            ureg_hist.append(a_joint.clone())
 
             p_foot_srbd = env.srbd.foot_positions_srbd(qref)  # (B,4,3)
             foot_err_vec = (p_foot_srbd - pref) * swing_mask
@@ -540,6 +618,25 @@ def train(num_iters=1000, steps_per_iter=24,
                 clear_margin = h_tar.view(B, 1) * 4.0 * s_swing * (1.0 - s_swing)
                 clear_viol = torch.relu(foot_tz + clear_margin - p_foot_srbd[..., 2])
                 clearance_hist.append(clear_viol * swing_mask.squeeze(-1))     # (B,4)
+
+            if n_res:
+                # Step 3 foothold quality: is the ground around the planned foothold flat?
+                # Sampled at env.gait.foothold_plan_xy, which the planner publishes attached
+                # (unlike swing_progress) precisely so this term can push the residual through
+                # it. This is the ONLY channel that shapes the residual toward *good* ground --
+                # loss_foot's copy of it is detached by default (STEP3_FOOTHOLD.md 4.3) and the
+                # L2 prior below only shrinks it.
+                #
+                # Swing legs only, like loss_foot and loss_clear: a stance leg's planned
+                # foothold is not what it is standing on and says nothing about the next step.
+                plan_xy = env.gait.foothold_plan_xy                            # (B,4,2)
+                q_ring = env.terrain_height_legs(
+                    ring_points(plan_xy, cfg.foot_q_radius, cfg.foot_q_ring),
+                    smooth=cfg.foot_q_smooth,
+                )                                                              # (B,4,k)
+                q_centre = env.terrain_height_legs(plan_xy, smooth=cfg.foot_q_smooth)  # (B,4)
+                fq_hist.append(foothold_quality(q_ring, q_centre) * swing_mask.squeeze(-1))
+                res_hist.append(foot_res)                                      # (B,4,2)
 
             # Angular velocity (env.srbd_w is already in the body frame)
             omega_hist.append(env.srbd_w.clone())
@@ -744,6 +841,22 @@ def train(num_iters=1000, steps_per_iter=24,
         else:
             loss_clearance = torch.tensor(0.0, device=device)
 
+        # Perceptive foothold (Step 3). Both are computed and logged whenever the residual is
+        # on, including at weight 0 -- that weights-0 run is what the weights get calibrated
+        # from, which is the 22.3 procedure that worked for the tilt barrier.
+        if fq_hist:
+            loss_fq = torch.stack(fq_hist).mean()
+            res_seq = torch.stack(res_hist)                 # (T,B,4,2)
+            loss_fres = (res_seq ** 2).sum(dim=-1).mean()
+            # Norm over xy, not mean over components: in x-only mode the y column is
+            # identically zero and a component mean would report half the real displacement.
+            # This is "how far the foothold actually moved", in metres, either way.
+            foot_res_abs = res_seq.detach().norm(dim=-1).mean()
+        else:
+            loss_fq = torch.tensor(0.0, device=device)
+            loss_fres = torch.tensor(0.0, device=device)
+            foot_res_abs = torch.tensor(0.0, device=device)
+
         yaw_w = 0.1
         loss = (a1*loss_v +
                 a2*loss_h +
@@ -758,6 +871,13 @@ def train(num_iters=1000, steps_per_iter=24,
         # then byte-for-byte the pre-1c one, which is what the inertness reprocheck asserts.
         if a8 > 0.0:
             loss = loss + a8 * loss_tilt
+        # Same guard, same reason (STEP3_FOOTHOLD.md 4.5): at a9 == a10 == 0 the objective is
+        # byte-for-byte the pre-Step-3 one, so a weights-0 probe measures the terms' natural
+        # size without changing the run it measures.
+        if a9 > 0.0:
+            loss = loss + a9 * loss_fq
+        if a10 > 0.0:
+            loss = loss + a10 * loss_fres
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -813,6 +933,14 @@ def train(num_iters=1000, steps_per_iter=24,
         # same in the results.
         loss_tilt_hist_iter.append(float(loss_tilt.detach().cpu()))
         tilt_frac_active_iter.append(float(tilt_frac_active.detach().cpu()))
+        # Same pairing as loss_tilt / tilt_frac_active: the two loss values give each term's
+        # share of the objective, and foot_res_abs_mean (metres) says whether the residual moved
+        # at all -- and, read against cfg.foot_res_max, whether it saturated the tanh.
+        # Without the third, "the correction did nothing" and "the correction stayed at zero"
+        # look identical in the results -- which is the mistake 22.4 was able to avoid.
+        loss_fq_hist_iter.append(float(loss_fq.detach().cpu()))
+        loss_fres_hist_iter.append(float(loss_fres.detach().cpu()))
+        foot_res_abs_iter.append(float(foot_res_abs.cpu()))
         # Yaw diagnostics. loss_yaw is in the objective (yaw_w below) but was never written to
         # iters.csv, which is why 19.9's finding -- the flat arm being penalised against a fixed
         # reset heading while carrying a live yaw command -- was invisible in the arm-A run and
@@ -854,6 +982,9 @@ def train(num_iters=1000, steps_per_iter=24,
                    loss_gproj=loss_gproj_hist_iter[-1],
                    loss_tilt=loss_tilt_hist_iter[-1],
                    tilt_frac_active=tilt_frac_active_iter[-1],
+                   loss_fq=loss_fq_hist_iter[-1],
+                   loss_fres=loss_fres_hist_iter[-1],
+                   foot_res_abs_mean=foot_res_abs_iter[-1],
                    loss_omega=loss_omega_hist_iter[-1],
                    loss_ctrl=loss_ctrl_hist_iter[-1],
                    loss_yaw=loss_yaw_hist_iter[-1],
@@ -908,6 +1039,8 @@ def train(num_iters=1000, steps_per_iter=24,
         "loss_ctrl":  np.array(loss_ctrl_hist_iter,  dtype=np.float32),
         "loss_gproj": np.array(loss_gproj_hist_iter, dtype=np.float32),
         "loss_tilt":  np.array(loss_tilt_hist_iter,  dtype=np.float32),
+        "loss_fq":    np.array(loss_fq_hist_iter,    dtype=np.float32),
+        "loss_fres":  np.array(loss_fres_hist_iter,  dtype=np.float32),
         "loss_foot":  np.array(loss_foot_hist_iter,  dtype=np.float32),
         "loss_clear": np.array(loss_clear_hist_iter, dtype=np.float32),
     }

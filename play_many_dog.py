@@ -36,6 +36,7 @@ from config import EnvCfg, PURE_PAPER_MODE
 from env import RealQuadEnv
 from policy import Policy, VisionPolicy
 from terrain import terrain_family_by_column
+from evaluate_rudin_comparison import policy_action_dim, split_action
 
 
 def load_policy(weight_path: str,
@@ -239,11 +240,15 @@ def main():
 
     # env.obs_dim keeps the policy size consistent with the env configuration
     # (36 blind, 36+187 with the height scan).
-    net = (VisionPolicy(dim_obs=env.obs_dim, dim_action=12)
+    # Step 3 made dim_action variable (12, or 12+4/12+8 for a foothold-residual policy), so it
+    # is read off the checkpoint's last layer rather than assumed -- otherwise loading one of
+    # those is a shape error. Old 12-output checkpoints still report 12.
+    dim_action = policy_action_dim(args.weights)
+    net = (VisionPolicy(dim_obs=env.obs_dim, dim_action=dim_action)
            if args.obs_mode == "depth" else None)
-    policy = load_policy(args.weights, device, dim_obs=env.obs_dim, policy=net)
+    policy = load_policy(args.weights, device, dim_obs=env.obs_dim,
+                         dim_action=dim_action, policy=net)
     B = env.B
-    dim_action = 12
 
     # Same action_hold / smoothing logic as train.py.
     hx = None
@@ -291,7 +296,9 @@ def main():
                         hx = hx_hold
 
             # Environment step forward (automatically calls IsaacGym simulate + viewer refresh)
-            _, extra, q_err, q_ref = env.step(a)
+            # Only the 12 joint offsets drive the simulator; a residual policy's extra
+            # foothold outputs are a training-time signal to the gait planner.
+            _, extra, q_err, q_ref = env.step(split_action(a))
 
             done = extra["done"]  # (B,)
             if done.any():

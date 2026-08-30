@@ -42,6 +42,41 @@ from utils_math import set_seed
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
+def policy_action_dim(weight_path: str, default: int = 12) -> int:
+    """Action width a checkpoint was trained with, read off its last layer.
+
+    Step 3 made ``dim_action`` variable: a foothold-residual policy emits
+    ``12 + 4`` (or ``+8``) outputs instead of 12, and constructing the wrong
+    width turns a checkpoint load into a shape error. Both policies end in
+    ``net.<last>.weight`` of shape (dim_action, hidden), so the file answers the
+    question without a matching ``meta.json`` -- which older runs do not have.
+    Falls back to ``default`` for a missing or unreadable file, which keeps the
+    "no weights, run randomly initialised" path working.
+    """
+    if not os.path.isfile(weight_path):
+        return default
+    try:
+        state = torch.load(weight_path, map_location="cpu")
+    except Exception:
+        return default
+    keys = [k for k in state if k.startswith("net.") and k.endswith(".weight")]
+    if not keys:
+        return default
+    last = max(keys, key=lambda k: int(k.split(".")[1]))
+    return int(state[last].shape[0])
+
+
+def split_action(a, dim_joint: int = 12):
+    """First ``dim_joint`` columns of a policy action -- what ``env.step`` accepts.
+
+    A foothold-residual policy's extra outputs are consumed by the gait planner
+    during training, not by the simulator. The playback and evaluation scripts do
+    not rebuild the planner's foothold targets, so they simply drop them: the
+    joint offsets are what actually drive the robot.
+    """
+    return a[:, :dim_joint] if a.shape[1] > dim_joint else a
+
+
 
 def load_policy(policy: torch.nn.Module, weight_path: str, device: torch.device) -> torch.nn.Module:
     """Load weights into an already-built policy (Policy or VisionPolicy).
@@ -165,9 +200,9 @@ def main():
     env = RealQuadEnv(cfg, device=device)
     env.reset()
     if args.obs_mode == "depth":
-        policy = VisionPolicy(dim_obs=env.obs_dim, dim_action=12)
+        policy = VisionPolicy(dim_obs=env.obs_dim, dim_action=policy_action_dim(args.weights))
     else:
-        policy = Policy(dim_obs=env.obs_dim, dim_action=12)
+        policy = Policy(dim_obs=env.obs_dim, dim_action=policy_action_dim(args.weights))
     policy = load_policy(policy, args.weights, device)
 
     B = env.B
@@ -275,7 +310,7 @@ def main():
             a = a_prev
             hx = hx_hold
 
-        _, extra, _, _ = env.step(a)
+        _, extra, _, _ = env.step(split_action(a))
 
         # ---- metrics for this step (state reflects the command followed this step; pre-reset) ----
         if t >= args.warmup:

@@ -595,6 +595,31 @@ class RealQuadEnv:
         assert self.perception is not None, "cfg.use_perception must be True for terrain_height_diff"
         return self.perception.height_sampler.sample_points(xy, smooth=smooth)
 
+    def terrain_height_legs(self, xy_legs, smooth=False):
+        """Differentiable terrain height at per-leg points, (B, 4, ...,  2) -> (B, 4, ...).
+
+        Thin shape adapter over :meth:`terrain_height_diff`, which wants a flat (B, N, 2).
+        Everything in Step 3 queries the terrain per leg -- 4 landing points, 4 x n chord
+        samples, 4 x k ring points -- and each would otherwise repeat the same reshape.
+        Folding the leg and sample axes into one N keeps it to a single ``grid_sample``.
+
+        ``smooth`` defaults to **False** here, the opposite of ``terrain_height_diff``. The
+        Step 3 callers want terrain *values* (where to put the foot) or a spread between
+        samples, not the smoothed slope the clearance loss reads: ``hm_loss_blur_cells = 2.0``
+        at ``horizontal_scale = 0.1`` is a 0.2 m Gaussian against a 0.31 m stair tread, which
+        would aim the foot halfway between tread and riser near every edge.
+
+        Args:
+            xy_legs: (B, 4, 2) or (B, 4, M, 2) world-frame query points, metres.
+            smooth: Sample the Gaussian-blurred loss field instead of the exact one.
+
+        Returns:
+            (B, 4) or (B, 4, M) terrain heights, metres.
+        """
+        shape = xy_legs.shape[:-1]                      # (B,4) or (B,4,M)
+        flat = xy_legs.reshape(shape[0], -1, 2)         # (B, N, 2)
+        return self.terrain_height_diff(flat, smooth=smooth).view(*shape)
+
     def _sanity_check_io(self):
         """One-time startup check: print Jacobian shapes/norm so IO problems fail loudly."""
         self.gym.refresh_jacobian_tensors(self.sim)
