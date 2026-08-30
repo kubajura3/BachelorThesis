@@ -1,0 +1,108 @@
+Importing module 'gym_38' (/home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/jakub/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/jakub/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/jakub/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+[SRBD] Custom CUDA kernel active (CUDA_KERNEL_SRBD=True in config.py).
+[physx] rudin buffers: default_buffer_size_multiplier=5.0 max_gpu_contact_pairs=8388608
+[env] creating PhysX simulation
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[env] simulation created
+[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape
+[terrain] adding Rudin curriculum-grid triangle mesh
+[terrain] Rudin curriculum-grid mesh added
+[env] loading asset go2_description.urdf from /home/jakub/projects/BachelorThesis
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/base.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+
+[DBG] Asset DOFs in order:
+  00: FL_hip_joint
+  01: FL_thigh_joint
+  02: FL_calf_joint
+  03: FR_hip_joint
+  04: FR_thigh_joint
+  05: FR_calf_joint
+  06: RL_hip_joint
+  07: RL_thigh_joint
+  08: RL_calf_joint
+  09: RR_hip_joint
+  10: RR_thigh_joint
+  11: RR_calf_joint
+
+[DBG] Mapping to key12:
+  FL_hip       -> asset dof idx 0
+  FL_thigh     -> asset dof idx 1
+  FL_calf      -> asset dof idx 2
+  FR_hip       -> asset dof idx 3
+  FR_thigh     -> asset dof idx 4
+  FR_calf      -> asset dof idx 5
+  RL_hip       -> asset dof idx 6
+  RL_thigh     -> asset dof idx 7
+  RL_calf      -> asset dof idx 8
+  RR_hip       -> asset dof idx 9
+  RR_thigh     -> asset dof idx 10
+  RR_calf      -> asset dof idx 11
+[DBG] ctrl_idx (key12 -> raw_names index): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]
+[INFO] feet_local rigid bodies (FL,FR,RL,RR idx): [4, 8, 14, 18]
+[env] isaac env-grid origins: x [0.00, 0.00] y [0.00, 0.00] (spacing=0.0, num_per_row=4)
+[env] rudin actor create poses: x [4.00, 44.00] y [4.00, 148.00] z [-0.91, 1.43]
+Loading extension module gymtorch...
+driveMode unique (after set): {1}
+stiffness range: 60.0 – 60.0
+damping   range: 2.0 – 2.0
+[DBG] lower[12] = [-1.0472 -1.5708 -2.7227 -1.0472 -1.5708 -2.7227 -1.0472 -0.5236 -2.7227
+ -1.0472 -0.5236 -2.7227]
+[DBG] upper[12] = [ 1.0472   3.4907  -0.83776  1.0472   3.4907  -0.83776  1.0472   4.5379
+ -0.83776  1.0472   4.5379  -0.83776]
+[DBG] effort[12] = [23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43]
+[INFO] Jacobian detected as floating-base: cols=18, dof_count=12, offset=6
+[CHECK] foot_jacobians shape: (16, 4, 3, 18)  (B,4,3,cols)
+[CHECK] J12 shape: (16, 4, 3, 12)  (B,4,3,12)
+[CHECK] ||J12||: 3.978527545928955
+Warp 1.0.2 initialized:
+   CUDA Toolkit 11.5, Driver 13.0
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce GTX 1660 Ti" (6 GiB, sm_75, mempool enabled)
+   Kernel cache:
+     /home/jakub/.cache/warp/1.0.2
+[perception] collector ready (B=16, device=cuda, terrain_type=rudin).
+[bench] logging to results/diag23/wire_q0
+  0%|                                                                | 0/25 [00:00<?, ?it/s]Iter    0 | loss 1.804 | v_body_x +0.09 | |g| 0.328:   0%|           | 0/25 [00:00<?, ?it/s]Iter    0 | loss 1.804 | v_body_x +0.09 | |g| 0.328:   4%|   | 1/25 [00:00<00:18,  1.27it/s]Iter    1 | loss 1.756 | v_body_x +0.10 | |g| 0.316:   4%|   | 1/25 [00:01<00:18,  1.27it/s]Iter    1 | loss 1.756 | v_body_x +0.10 | |g| 0.316:   8%|▏  | 2/25 [00:01<00:13,  1.74it/s]Iter    2 | loss 1.704 | v_body_x +0.10 | |g| 0.376:   8%|▏  | 2/25 [00:01<00:13,  1.74it/s]Iter    2 | loss 1.704 | v_body_x +0.10 | |g| 0.376:  12%|▎  | 3/25 [00:01<00:11,  1.96it/s]Iter    3 | loss 1.568 | v_body_x +0.12 | |g| 0.397:  12%|▎  | 3/25 [00:02<00:11,  1.96it/s]Iter    3 | loss 1.568 | v_body_x +0.12 | |g| 0.397:  16%|▍  | 4/25 [00:02<00:10,  2.07it/s]Iter    4 | loss 1.341 | v_body_x +0.15 | |g| 0.424:  16%|▍  | 4/25 [00:02<00:10,  2.07it/s]Iter    4 | loss 1.341 | v_body_x +0.15 | |g| 0.424:  20%|▌  | 5/25 [00:02<00:09,  2.12it/s]Iter    5 | loss 1.061 | v_body_x +0.19 | |g| 0.401:  20%|▌  | 5/25 [00:02<00:09,  2.12it/s]Iter    5 | loss 1.061 | v_body_x +0.19 | |g| 0.401:  24%|▋  | 6/25 [00:02<00:08,  2.17it/s]Iter    6 | loss 0.764 | v_body_x +0.24 | |g| 0.353:  24%|▋  | 6/25 [00:03<00:08,  2.17it/s]Iter    6 | loss 0.764 | v_body_x +0.24 | |g| 0.353:  28%|▊  | 7/25 [00:03<00:08,  2.22it/s]Iter    7 | loss 0.508 | v_body_x +0.31 | |g| 0.260:  28%|▊  | 7/25 [00:03<00:08,  2.22it/s]Iter    7 | loss 0.508 | v_body_x +0.31 | |g| 0.260:  32%|▉  | 8/25 [00:03<00:07,  2.26it/s]Iter    8 | loss 0.330 | v_body_x +0.38 | |g| 0.143:  32%|▉  | 8/25 [00:04<00:07,  2.26it/s]Iter    8 | loss 0.330 | v_body_x +0.38 | |g| 0.143:  36%|█  | 9/25 [00:04<00:07,  2.28it/s]Iter    9 | loss 0.269 | v_body_x +0.46 | |g| 0.073:  36%|█  | 9/25 [00:04<00:07,  2.28it/s]Iter    9 | loss 0.269 | v_body_x +0.46 | |g| 0.073:  40%|▊ | 10/25 [00:04<00:06,  2.30it/s]Iter   10 | loss 0.298 | v_body_x +0.51 | |g| 0.171:  40%|▊ | 10/25 [00:05<00:06,  2.30it/s]Iter   10 | loss 0.298 | v_body_x +0.51 | |g| 0.171:  44%|▉ | 11/25 [00:05<00:06,  2.29it/s]Iter   11 | loss 0.361 | v_body_x +0.55 | |g| 0.240:  44%|▉ | 11/25 [00:05<00:06,  2.29it/s]Iter   11 | loss 0.361 | v_body_x +0.55 | |g| 0.240:  48%|▉ | 12/25 [00:05<00:05,  2.32it/s]Iter   12 | loss 0.427 | v_body_x +0.58 | |g| 0.296:  48%|▉ | 12/25 [00:05<00:05,  2.32it/s]Iter   12 | loss 0.427 | v_body_x +0.58 | |g| 0.296:  52%|█ | 13/25 [00:05<00:05,  2.31it/s]Iter   13 | loss 0.545 | v_body_x +0.62 | |g| 0.372:  52%|█ | 13/25 [00:06<00:05,  2.31it/s]Iter   13 | loss 0.545 | v_body_x +0.62 | |g| 0.372:  56%|█ | 14/25 [00:06<00:04,  2.30it/s]Iter   14 | loss 0.963 | v_body_x +0.59 | |g| 0.318:  56%|█ | 14/25 [00:06<00:04,  2.30it/s]Iter   14 | loss 0.963 | v_body_x +0.59 | |g| 0.318:  60%|█▏| 15/25 [00:06<00:04,  2.29it/s]Iter   15 | loss 1.298 | v_body_x +0.60 | |g| 0.317:  60%|█▏| 15/25 [00:07<00:04,  2.29it/s]Iter   15 | loss 1.298 | v_body_x +0.60 | |g| 0.317:  64%|█▎| 16/25 [00:07<00:03,  2.29it/s]Iter   16 | loss 1.426 | v_body_x +0.64 | |g| 0.394:  64%|█▎| 16/25 [00:07<00:03,  2.29it/s]Iter   16 | loss 1.426 | v_body_x +0.64 | |g| 0.394:  68%|█▎| 17/25 [00:07<00:03,  2.25it/s]Iter   17 | loss 1.964 | v_body_x +0.56 | |g| 0.346:  68%|█▎| 17/25 [00:08<00:03,  2.25it/s]Iter   17 | loss 1.964 | v_body_x +0.56 | |g| 0.346:  72%|█▍| 18/25 [00:08<00:03,  2.24it/s]Iter   18 | loss 4.230 | v_body_x -0.00 | |g| 1.578:  72%|█▍| 18/25 [00:08<00:03,  2.24it/s]Iter   18 | loss 4.230 | v_body_x -0.00 | |g| 1.578:  76%|█▌| 19/25 [00:08<00:02,  2.25it/s]Iter   19 | loss 5.125 | v_body_x -0.17 | |g| 1.865:  76%|█▌| 19/25 [00:09<00:02,  2.25it/s]Iter   19 | loss 5.125 | v_body_x -0.17 | |g| 1.865:  80%|█▌| 20/25 [00:09<00:02,  2.23it/s]Iter   20 | loss 3.714 | v_body_x -0.06 | |g| 1.530:  80%|█▌| 20/25 [00:09<00:02,  2.23it/s]Iter   20 | loss 3.714 | v_body_x -0.06 | |g| 1.530:  84%|█▋| 21/25 [00:09<00:01,  2.21it/s]Iter   21 | loss 2.701 | v_body_x +0.03 | |g| 1.277:  84%|█▋| 21/25 [00:10<00:01,  2.21it/s]Iter   21 | loss 2.701 | v_body_x +0.03 | |g| 1.277:  88%|█▊| 22/25 [00:10<00:01,  2.15it/s]Iter   22 | loss 2.856 | v_body_x +0.02 | |g| 1.234:  88%|█▊| 22/25 [00:10<00:01,  2.15it/s]Iter   22 | loss 2.856 | v_body_x +0.02 | |g| 1.234:  92%|█▊| 23/25 [00:10<00:00,  2.11it/s]Iter   23 | loss 3.065 | v_body_x -0.00 | |g| 1.280:  92%|█▊| 23/25 [00:11<00:00,  2.11it/s]Iter   23 | loss 3.065 | v_body_x -0.00 | |g| 1.280:  96%|█▉| 24/25 [00:11<00:00,  2.06it/s]Iter   24 | loss 3.240 | v_body_x -0.02 | |g| 1.243:  96%|█▉| 24/25 [00:11<00:00,  2.06it/s]Iter   24 | loss 3.240 | v_body_x -0.02 | |g| 1.243: 100%|██| 25/25 [00:11<00:00,  2.05it/s]Iter   24 | loss 3.240 | v_body_x -0.02 | |g| 1.243: 100%|██| 25/25 [00:11<00:00,  2.16it/s]
+[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.116,-0.014) v_b=(+0.117,-0.000)
+[DBG_DIR t=00200] pos_w=(+12.500,+4.861) v_w=(-0.364,-0.038) v_b=(+0.367,-0.007)
+[DBG_DIR t=00400] pos_w=(+12.283,+4.833) v_w=(-0.637,-0.081) v_b=(+0.738,+0.006)
+[train] Saved TorchScript: results/diag23/wire_q0/quad_diffsim_srbd_align_multi_robot.pt
+[train] final curriculum: mean level 2.50 (max 5), histogram over rows [2, 3, 4, 2, 2, 3, 0, 0, 0, 0]
+[train]   discrete obstacles   n=    3  mean level 1.33  contacts 3.02  minFootClear +0.013 m
+[train]   rough slope          n=    2  mean level 2.50  contacts 3.04  minFootClear +0.006 m
+[train]   smooth slope         n=    2  mean level 2.00  contacts 3.04  minFootClear +0.013 m
+[train]   stairs down          n=    5  mean level 3.40  contacts 3.18  minFootClear +0.013 m
+[train]   stairs up            n=    4  mean level 2.50  contacts 3.01  minFootClear +0.013 m
+[bench] results/diag23/wire_q0: 2.021 it/s median over 5 timed iters, peak 37 MB
+[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).

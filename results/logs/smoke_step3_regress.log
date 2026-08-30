@@ -1,0 +1,98 @@
+Importing module 'gym_38' (/home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_38.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/jakub/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.13.1+cu117
+Device count 1
+/home/jakub/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/jakub/.cache/torch_extensions/py38_cu117 as PyTorch extensions root...
+Emitting ninja build file /home/jakub/.cache/torch_extensions/py38_cu117/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+[SRBD] Custom CUDA kernel active (CUDA_KERNEL_SRBD=True in config.py).
+[physx] rudin buffers: default_buffer_size_multiplier=5.0 max_gpu_contact_pairs=8388608
+[env] creating PhysX simulation
+Not connected to PVD
++++ Using GPU PhysX
+Physics Engine: PhysX
+Physics Device: cuda:0
+GPU Pipeline: enabled
+[env] simulation created
+[Terrain] terrain_type='rudin' -> using Rudin curriculum-grid landscape
+[terrain] adding Rudin curriculum-grid triangle mesh
+[terrain] Rudin curriculum-grid mesh added
+[env] loading asset go2_description.urdf from /home/jakub/projects/BachelorThesis
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/base.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/hip.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/thigh_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/calf_mirror.dae'
+[Error] [carb.gym.plugin] Failed to resolve visual mesh 'dae/foot.dae'
+
+[DBG] Asset DOFs in order:
+  00: FL_hip_joint
+  01: FL_thigh_joint
+  02: FL_calf_joint
+  03: FR_hip_joint
+  04: FR_thigh_joint
+  05: FR_calf_joint
+  06: RL_hip_joint
+  07: RL_thigh_joint
+  08: RL_calf_joint
+  09: RR_hip_joint
+  10: RR_thigh_joint
+  11: RR_calf_joint
+
+[DBG] Mapping to key12:
+  FL_hip       -> asset dof idx 0
+  FL_thigh     -> asset dof idx 1
+  FL_calf      -> asset dof idx 2
+  FR_hip       -> asset dof idx 3
+  FR_thigh     -> asset dof idx 4
+  FR_calf      -> asset dof idx 5
+  RL_hip       -> asset dof idx 6
+  RL_thigh     -> asset dof idx 7
+  RL_calf      -> asset dof idx 8
+  RR_hip       -> asset dof idx 9
+  RR_thigh     -> asset dof idx 10
+  RR_calf      -> asset dof idx 11
+[DBG] ctrl_idx (key12 -> raw_names index): [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+[OK] key12 order is [FL*3, FR*3, RL*3, RR*3]
+[INFO] feet_local rigid bodies (FL,FR,RL,RR idx): [4, 8, 14, 18]
+[env] isaac env-grid origins: x [0.00, 0.00] y [0.00, 0.00] (spacing=0.0, num_per_row=32)
+[env] rudin actor create poses: x [4.00, 44.00] y [4.00, 156.00] z [-0.91, 1.61]
+Loading extension module gymtorch...
+driveMode unique (after set): {1}
+stiffness range: 60.0 – 60.0
+damping   range: 2.0 – 2.0
+[DBG] lower[12] = [-1.0472 -1.5708 -2.7227 -1.0472 -1.5708 -2.7227 -1.0472 -0.5236 -2.7227
+ -1.0472 -0.5236 -2.7227]
+[DBG] upper[12] = [ 1.0472   3.4907  -0.83776  1.0472   3.4907  -0.83776  1.0472   4.5379
+ -0.83776  1.0472   4.5379  -0.83776]
+[DBG] effort[12] = [23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43 23.7  23.7  45.43]
+[INFO] Jacobian detected as floating-base: cols=18, dof_count=12, offset=6
+[CHECK] foot_jacobians shape: (1024, 4, 3, 18)  (B,4,3,cols)
+[CHECK] J12 shape: (1024, 4, 3, 12)  (B,4,3,12)
+[CHECK] ||J12||: 31.845705032348633
+[bench] logging to results/smoke_step3/regress
+  0%|                                                                 | 0/5 [00:00<?, ?it/s]Iter    0 | loss 1.740 | v_body_x +0.09 | |g| 0.679:   0%|            | 0/5 [00:02<?, ?it/s]Iter    0 | loss 1.740 | v_body_x +0.09 | |g| 0.679:  20%|▊   | 1/5 [00:02<00:10,  2.66s/it]Iter    1 | loss 1.600 | v_body_x +0.11 | |g| 0.617:  20%|▊   | 1/5 [00:03<00:10,  2.66s/it]Iter    1 | loss 1.600 | v_body_x +0.11 | |g| 0.617:  40%|█▌  | 2/5 [00:03<00:04,  1.62s/it]Iter    2 | loss 1.340 | v_body_x +0.15 | |g| 0.591:  40%|█▌  | 2/5 [00:04<00:04,  1.62s/it]Iter    2 | loss 1.340 | v_body_x +0.15 | |g| 0.591:  60%|██▍ | 3/5 [00:04<00:02,  1.29s/it]Iter    3 | loss 0.937 | v_body_x +0.21 | |g| 0.505:  60%|██▍ | 3/5 [00:05<00:02,  1.29s/it]Iter    3 | loss 0.937 | v_body_x +0.21 | |g| 0.505:  80%|███▏| 4/5 [00:05<00:01,  1.13s/it]Iter    4 | loss 0.522 | v_body_x +0.30 | |g| 0.322:  80%|███▏| 4/5 [00:06<00:01,  1.13s/it]Iter    4 | loss 0.522 | v_body_x +0.30 | |g| 0.322: 100%|████| 5/5 [00:06<00:00,  1.05s/it]Iter    4 | loss 0.522 | v_body_x +0.30 | |g| 0.322: 100%|████| 5/5 [00:06<00:00,  1.25s/it]
+[DBG_DIR t=00000] pos_w=(+12.570,+4.868) v_w=(-0.114,-0.015) v_b=(+0.115,+0.001)
+[train] Saved TorchScript: results/smoke_step3/regress/quad_diffsim_srbd_align_multi_robot.pt
+[train] final curriculum: mean level 2.49 (max 5), histogram over rows [177, 185, 158, 152, 172, 180, 0, 0, 0, 0]
+[train]   discrete obstacles   n=  204  mean level 2.48  contacts 3.79  minFootClear +0.013 m
+[train]   rough slope          n=  102  mean level 2.51  contacts 2.81  minFootClear -0.030 m
+[train]   smooth slope         n=  103  mean level 2.41  contacts 3.78  minFootClear +0.013 m
+[train]   stairs down          n=  359  mean level 2.61  contacts 3.77  minFootClear -0.107 m
+[train]   stairs up            n=  256  mean level 2.34  contacts 3.78  minFootClear -0.034 m
+[bench] results/smoke_step3/regress: 1.116 it/s median over 5 timed iters, peak 65 MB
+[train] Training done (multi-robot SRBD + alpha-align, Eq.(5) loss, body-frame vx tracking).
