@@ -1159,7 +1159,7 @@ def _env_mode():
 
 if __name__ == "__main__":
     train(num_iters=_env_int("ITERS", 1000),
-          steps_per_iter=24,
+          steps_per_iter=_env_int("STEPS_PER_ITER", 24),
           seed=_env_int("SEED", 0, minimum=0),
           mode=_env_mode(),
           num_envs=_env_int("NUM_ENVS"),
