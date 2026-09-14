@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 #
-# THESIS_PLAN sec 6.8 -- perceptual saliency (corruption) diagnostic.
 #
 #   ./run_saliency.sh selftest   wiring checks only, seconds, no rollout
 #   ./run_saliency.sh probe      one short run to MEASURE the per-run cost
@@ -80,7 +79,7 @@ case "${1:-}" in
     # zero/shuffle means the channel slice is wrong and the whole diagnostic would return a
     # fake null. Run this before spending any GPU on the matrix.
     # hobs and height share the same architecture and channel, so hobs covers both. One
-    # invocation per obs-mode: --selftest checks none/zero/shuffle internally, and the Rudin
+    # invocation per obs-mode: --selftest checks none/zero/shuffle internally and the Rudin
     # trimesh build is what actually costs time here.
     for mode in hobs depth; do
       w="$(weights_for "$mode")"; om="$(obs_mode_for "$mode")"

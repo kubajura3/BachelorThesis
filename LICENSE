@@ -1,0 +1,47 @@
+MIT License
+
+Copyright (c) 2026 Jakub Jura
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Third party portions
+--------------------
+
+Parts of this repository are derived from other projects and keep the license
+they were released under. The MIT grant above does not extend to them.
+
+* The main method (SRBD model, gait planner, environment and training loop)
+  is inherited from RonGenZ by Ronggan Zhang, which this repository is forked
+  from at commit 1731453. See https://github.com/RonGenZ/RonGenZ
+
+* The curriculum grid terrain generation in terrain.py and the terrain
+  curriculum and robot placement logic in env.py (_assign_rudin_origins,
+  _update_terrain_curriculum) are ported from legged_gym.
+  Copyright (c) 2021 ETH Zurich, Nikita Rudin. BSD 3 Clause license, which
+  continues to apply to those portions. See
+  https://github.com/leggedrobotics/legged_gym
+
+* perception/warp_kernels/cam_kernel.py is a trimmed copy of the depth range
+  ray casting kernel from the MGDP warp_sensor project and the camera wrapper
+  and depth preprocessing under perception/ are adapted from the same project.
+  Those files remain under the terms of their upstream project.
+
+* go2_description.urdf describes the Unitree Go2 and originates with Unitree
+  Robotics.
