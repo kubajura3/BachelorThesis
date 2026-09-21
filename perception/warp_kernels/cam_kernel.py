@@ -1,8 +1,8 @@
 """Depth-range ray-casting kernel (NVIDIA Warp).
 
 This kernel is a trimmed, self-contained copy of the depth-range kernel from the
-MGDP ``warp_sensor`` project (paper: *Multi-Modal Guided Data Perception* -- see
-``PERCEPTION_IMPLEMENTATION.md`` references). It is vendored here on purpose: the
+MGDP ``warp_sensor`` project (paper: *Multi-Modal Guided Data Perception*). It is
+vendored here on purpose: the
 thesis repository must run without any dependency on the MGDP code. Only the
 single depth-range variant is kept; the lidar / point-cloud / segmentation /
 normal kernels are dropped.

@@ -4,11 +4,10 @@ Runs without torch or isaacgym -- `resolve_cmd_style` / `heading_command_active`
 config.py precisely so this is importable on a dev machine with no GPU stack.
 
 Why this file exists: `terrain_type` used to select the command ranges as a side effect.
-CAMPAIGN_FINDINGS.md 19.2 decoupled them behind `cmd_style` and verified the cross-product by
-hand, leaving nothing behind; 19.9 then found that train.py had gone on resolving the same
-question independently, so `blind_omni` drew Rudin yaw commands while the loss still measured
-yaw against a fixed reset heading. The legacy table below is the regression guard that makes
-that class of drift a test failure instead of a campaign post-mortem.
+Decoupling them behind `cmd_style` was verified by hand once and left nothing behind; train.py
+then turned out to be resolving the same question independently, so `blind_omni` drew Rudin yaw
+commands while the loss still measured yaw against a fixed reset heading. The legacy table below
+is the regression guard that makes that class of drift a test failure instead of a post-mortem.
 """
 import os
 import sys
@@ -31,8 +30,8 @@ class FakeCfg:
 
 
 # (terrain_type, rand_cmd) -> style, for cmd_style=None. This is the ladder _sample_command
-# contained inline before 19.2; every run on disk predating that commit was produced by it, so
-# these six rows are what "reproduces bit-for-bit" means.
+# contained inline before `cmd_style` existed; every run on disk predating it was produced by
+# that ladder, so these six rows are what "reproduces bit-for-bit" means.
 LEGACY = [
     ("flat",  False, "fixed"),
     ("flat",  True,  "rand"),

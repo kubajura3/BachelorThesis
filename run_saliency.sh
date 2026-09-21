@@ -7,8 +7,8 @@
 #
 # Re-evaluates the already-trained policies in results/train/*_s0 with their terrain input
 # corrupted. Invariance to that corruption is direct evidence the policy learned to disregard
-# the signal, which is what turns the degenerate sec 6.4/6.5 result into a mechanism claim
-# (THESIS_PLAN sec E.3). No retraining.
+# the signal, which is what turns the degenerate training result into a mechanism claim. No
+# retraining.
 #
 # Same conventions as run_campaign.sh: sequential (one GPU), resumable (a run whose output
 # json already exists is skipped), and deliberately NOT `set -e` so one failure does not take
@@ -25,7 +25,7 @@ SEED="${SEED:-0}"
 # 15000 steps = 30 s of sim at dt=0.002; one episode is 20 s. A short warmup keeps the metric
 # window inside the phase where robots are still spread over levels 0-5 (spawn is
 # randint(0, max_init_terrain_level+1), ceiling 5), which is where the height scan carries
-# signal at all. See the plan's "warmup guidance" note.
+# signal at all.
 STEPS="${STEPS:-15000}"
 WARMUP="${WARMUP:-2000}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-3600}"
@@ -75,7 +75,7 @@ run_eval() {          # run_eval <mode> <corrupt> <tag-suffix> [extra args...]
 case "${1:-}" in
 
   selftest)
-    # Tier 1: does the corruption actually reach the policy? A zero action delta under
+    # Wiring first: does the corruption actually reach the policy? A zero action delta under
     # zero/shuffle means the channel slice is wrong and the whole diagnostic would return a
     # fake null. Run this before spending any GPU on the matrix.
     # hobs and height share the same architecture and channel, so hobs covers both. One
@@ -95,7 +95,7 @@ case "${1:-}" in
     ;;
 
   probe)
-    # Tier 3 prerequisite: MEASURE the per-run cost instead of extrapolating it. Multiply the
+    # Before the matrix: MEASURE the per-run cost instead of extrapolating it. Multiply the
     # reported seconds by STEPS/2000 to size the matrix, and remember depth is slower because
     # of the camera render.
     FULL_STEPS="$STEPS"
@@ -105,9 +105,9 @@ case "${1:-}" in
     ;;
 
   matrix)
-    # Tier 2 (noise floor) and tier 3 (diagnostic) in one queue. The two `none` runs per
-    # obs-mode are the floor: sec 19.14 established this sim is not bit-reproducible
-    # run-to-run, so a corruption effect only counts if it exceeds the spread between them.
+    # Noise floor and diagnostic in one queue. The two `none` runs per obs-mode are the
+    # floor: this sim is not bit-reproducible run to run, so a corruption effect only counts
+    # if it exceeds the spread between them.
     run_eval blind_rudin none none          # terrain-blind floor -- the other half of the test
     for mode in hobs height depth; do
       run_eval "$mode" none    none

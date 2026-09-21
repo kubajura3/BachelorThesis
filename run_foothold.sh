@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 #
-# Step 3 perceptive foothold -- everything that has to happen on the GPU box, in one queue.
-# See STEP3_FOOTHOLD.md for why each stage exists and what its gate is.
+# Perceptive foothold -- everything that has to happen on the GPU box, in one queue.
 #
-#   ./run_step3.sh seeds     ~28 min  the 22.8 item-1 baseline seeds -- RUN THIS FIRST
-#   ./run_step3.sh phase1    ~45 min  inertness / z-only / z+apex (no action-space change)
-#   ./run_step3.sh wiring    ~40 s    is loss_fq actually in the loss and in the gradient?
-#   ./run_step3.sh probe     ~2 min   weights-0 run -- calibrates FOOT_Q_W / FOOT_RES_W
-#   ./run_step3.sh probe2    ~6 min   recalibration probe, run long enough to reach the level
-#                                     the arms actually settle at (the 100-iter probe does not)
-#   ./run_step3.sh xy        ~16 min  Phase 2 axis comparison: x-only vs x+y, same weight
-#   ./run_step3.sh arms      ~28 min  Phase 2 at the calibrated 5% and 15% weights
-#   ./run_step3.sh detach    ~14 min  FOOT_RES_DETACH=0 ablation
-#   ./run_step3.sh all                seeds -> phase1 -> wiring -> probe -> arms -> detach
+#   ./run_foothold.sh seeds     ~28 min  the baseline seed band -- RUN THIS FIRST
+#   ./run_foothold.sh swing     ~45 min  inertness / z-only / z+apex (no action-space change)
+#   ./run_foothold.sh wiring    ~40 s    is loss_fq actually in the loss and in the gradient?
+#   ./run_foothold.sh probe     ~2 min   weights-0 run -- calibrates FOOT_Q_W / FOOT_RES_W
+#   ./run_foothold.sh probe2    ~6 min   recalibration probe, run long enough to reach the level
+#                                        the arms actually settle at (the 100-iter probe does not)
+#   ./run_foothold.sh xy        ~16 min  residual axis comparison: x-only vs x+y, same weight
+#   ./run_foothold.sh arms      ~28 min  residual at the calibrated 5% and 15% weights
+#   ./run_foothold.sh detach    ~14 min  FOOT_RES_DETACH=0 ablation
+#   ./run_foothold.sh all                seeds -> swing -> wiring -> probe -> arms -> detach
 #
-# Then read every gate at once with:   python collect_step3.py
+# Then read every gate at once with:   python collect_foothold.py
 #
-# Same conventions as run_step1c.sh: sequential (one GPU), resumable (a run whose RUN_DIR
+# Same conventions as run_tilt.sh: sequential (one GPU), resumable (a run whose RUN_DIR
 # already has summary.json is skipped -- delete the folder to force a redo), and deliberately
 # NOT `set -e` so one failure does not take the queue with it. Every run is tee'd to
-# results/logs/ -- and for Step 3 that matters more than usual, because the per-terrain-type
+# results/logs/ -- and here that matters more than usual, because the per-terrain-type
 # curriculum table is the primary gate and it exists ONLY in the log, not in iters.csv.
 
 set -uo pipefail
@@ -33,7 +32,7 @@ ITERS="${ITERS:-850}"
 ENVS="${ENVS:-1024}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-7200}"
 
-# Phase 1 flags, shared by the two treatment arms.
+# Swing-target flags, shared by the two treatment arms.
 FZ="FOOT_Z_TERRAIN=1"
 FZA="FOOT_Z_TERRAIN=1 FOOT_APEX_TERRAIN=1"
 
@@ -96,9 +95,9 @@ drain_queue() {
 # ----------------------------------------------------------------------------
 
 stage_seeds() {
-  # CAMPAIGN_FINDINGS.md 22.8 item 1. There is no TILT_W=0 Rudin replicate at 850 iterations on
-  # disk, so "the arm moved" currently has no noise band to be measured against -- and Phase 1's
-  # inertness arm is read against exactly that band. Nothing downstream means much without this.
+  # There is no TILT_W=0 Rudin replicate at 850 iterations on disk, so "the arm moved" has no
+  # noise band to be measured against -- and the inertness arm is read against exactly that
+  # band. Nothing downstream means much without this.
   local s
   for s in 1 2; do
     add_run "$RESULTS/diag21/rudin_fwd_w0_s$s" "MODE=blind_rudin_fwd SEED=$s ITERS=$ITERS NUM_ENVS=$ENVS"
@@ -106,8 +105,8 @@ stage_seeds() {
   drain_queue
 }
 
-stage_phase1() {
-  # A is the inertness arm: perception built, every Step 3 flag off. It isolates "turning
+stage_swing() {
+  # A is the inertness arm: perception built, every FOOT_* flag off. It isolates "turning
   # use_perception on" from the change itself, which is the one confound the treatment carries.
   add_run "$OUT/fz_off" "MODE=fz_fwd SEED=$SEED ITERS=$ITERS NUM_ENVS=$ENVS"
   add_run "$OUT/fz_z"   "MODE=fz_fwd $FZ SEED=$SEED ITERS=$ITERS NUM_ENVS=$ENVS"
@@ -127,9 +126,10 @@ stage_wiring() {
 
 stage_probe() {
   # loss_fq and loss_fres are logged at weight 0, so a run that uses no weight measures the size
-  # of the terms for one that will (the 22.3 procedure). 100 iterations covers the window the
-  # curriculum actually collapses over. Also the 4.4 blur check: compare loss_fq on the stair
-  # rows against the smooth-slope rows -- if they read the same, the blur is too wide.
+  # of the terms for one that will, the same procedure used for the tilt barrier. 100
+  # iterations covers the window the curriculum actually collapses over. Also the blur check:
+  # compare loss_fq on the stair rows against the smooth-slope rows -- if they read the same,
+  # the blur is too wide.
   add_run "$OUT2/fhold_probe" "MODE=fhold_fwd FOOT_RES=1 $FZA SEED=$SEED ITERS=100 NUM_ENVS=$ENVS"
   drain_queue
 }
@@ -138,19 +138,19 @@ stage_probe2() {
   # The shipped 100-iteration probe measures the terms over levels 2.49 -> 1.52, but a full arm
   # spends its last ~600 iterations at level ~0.02. Row-0 risers are 5 cm against the probe's
   # ~10 cm, and the foothold-quality term is a SQUARED height spread, so the weight calibrated
-  # from that window is fitted to roughly 4x the signal the arm will actually see. 4.5's own
-  # warning ("calibrate in the regime the arm runs in", the 22.3 6x lesson) applies to it.
+  # from that window is fitted to roughly 4x the signal the arm will actually see. The rule
+  # "calibrate in the regime the arm runs in" applies here too.
   add_run "$OUT2/fhold_probe450"     "MODE=fhold_fwd FOOT_RES=1 $FZA SEED=$SEED ITERS=$PROBE2_ITERS NUM_ENVS=$ENVS"
   drain_queue
 }
 
 stage_xy() {
   # Two arms differing in ONE bit: FOOT_RES_Y. Same weight, same seed, same everything else,
-  # so the sagittal-only claim in 2.1 is measured rather than assumed. dim_action is 16 and 20.
+  # so the sagittal-only claim is measured rather than assumed. dim_action is 16 and 20.
   #
   # What the cut to $XY_ITERS costs: the per-terrain-type table -- the primary gate -- is
   # written only at the end of a run (final_state.json), so these arms are read against
-  # 850-iteration Phase 1 tables. That is conservative, not unfair: stairs sit at level 0.000
+  # 850-iteration swing-target tables. That is conservative, not unfair: stairs sit at 0.000
   # with max_terrain_level 0 from iteration ~300 onward in every run on disk, so a shorter arm
   # showing movement is still a real signal, while showing 0.000 is what the long runs show too.
   local qw rw pd
@@ -158,10 +158,10 @@ stage_xy() {
   if [[ -z "$pd" ]]; then
     if [[ -d "$OUT2/fhold_probe450" ]]; then pd="diag23/fhold_probe450"; else pd="diag23/fhold_probe"; fi
   fi
-  qw="${FOOT_Q_W_CAL:-$("$PYTHON" collect_step3.py --weight 0.05 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
-  rw="${FOOT_RES_W_CAL:-$("$PYTHON" collect_step3.py --res-weight 0.02 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
+  qw="${FOOT_Q_W_CAL:-$("$PYTHON" collect_foothold.py --weight 0.05 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
+  rw="${FOOT_RES_W_CAL:-$("$PYTHON" collect_foothold.py --res-weight 0.02 --probe-dir "$pd" --results-dir "$RESULTS" 2>/dev/null)}"
   if [[ -z "${qw:-}" || "$qw" == "0" ]]; then
-    echo "[$(stamp)] SKIP  xy -- no weight available; run './run_step3.sh probe2' first"
+    echo "[$(stamp)] SKIP  xy -- no weight available; run './run_foothold.sh probe2' first"
     return
   fi
   echo "[$(stamp)] xy: calibrated from $pd -- FOOT_Q_W=$qw (5%)  FOOT_RES_W=$rw (2%)"
@@ -174,13 +174,13 @@ stage_arms() {
   local qw rw
   qw="${FOOT_Q_W_CAL:-}"; rw="${FOOT_RES_W_CAL:-}"
   if [[ -z "$qw" ]]; then
-    qw="$("$PYTHON" collect_step3.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)"
+    qw="$("$PYTHON" collect_foothold.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)"
   fi
   if [[ -z "$rw" ]]; then
-    rw="$("$PYTHON" collect_step3.py --res-weight 0.02 --results-dir "$RESULTS" 2>/dev/null)"
+    rw="$("$PYTHON" collect_foothold.py --res-weight 0.02 --results-dir "$RESULTS" 2>/dev/null)"
   fi
   if [[ -z "${qw:-}" || "$qw" == "0" ]]; then
-    echo "[$(stamp)] SKIP  arms -- no weight available; run './run_step3.sh probe' first"
+    echo "[$(stamp)] SKIP  arms -- no weight available; run './run_foothold.sh probe' first"
     return
   fi
   echo "[$(stamp)] arms: FOOT_Q_W=$qw (5% of loss)  FOOT_RES_W=$rw (2%)"
@@ -193,12 +193,13 @@ stage_arms() {
 }
 
 stage_detach() {
-  # Whether the degenerate minimum 4.3 guards against actually appears, rather than assuming it.
+  # Whether the degenerate minimum the detach guards against actually appears, rather than
+  # assuming it.
   local qw rw
-  qw="${FOOT_Q_W_CAL:-$("$PYTHON" collect_step3.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)}"
-  rw="${FOOT_RES_W_CAL:-$("$PYTHON" collect_step3.py --res-weight 0.02 --results-dir "$RESULTS" 2>/dev/null)}"
+  qw="${FOOT_Q_W_CAL:-$("$PYTHON" collect_foothold.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)}"
+  rw="${FOOT_RES_W_CAL:-$("$PYTHON" collect_foothold.py --res-weight 0.02 --results-dir "$RESULTS" 2>/dev/null)}"
   if [[ -z "${qw:-}" || "$qw" == "0" ]]; then
-    echo "[$(stamp)] SKIP  detach -- no weight available; run './run_step3.sh probe' first"
+    echo "[$(stamp)] SKIP  detach -- no weight available; run './run_foothold.sh probe' first"
     return
   fi
   add_run "$OUT2/fhold_nodetach" \
@@ -208,7 +209,7 @@ stage_detach() {
 
 case "${1:-}" in
   seeds)   stage_seeds ;;
-  phase1)  stage_phase1 ;;
+  swing)   stage_swing ;;
   wiring)  stage_wiring ;;
   probe)   stage_probe ;;
   probe2)  stage_probe2 ;;
@@ -216,16 +217,17 @@ case "${1:-}" in
   arms)    stage_arms ;;
   detach)  stage_detach ;;
   all)
-    # Seeds first (they are the band everything is read against), then Phase 1. Wiring before
-    # any Phase 2 arm: if the term is not in the loss, nothing after it means anything.
+    # Seeds first (they are the band everything is read against), then the swing target.
+    # Wiring before any residual arm: if the term is not in the loss, nothing after it means
+    # anything.
     stage_seeds
-    stage_phase1
+    stage_swing
     stage_wiring
     stage_probe
     stage_arms
     stage_detach
     ;;
-  *) sed -n '2,24p' "$0"; exit 1 ;;
+  *) sed -n '2,22p' "$0"; exit 1 ;;
 esac
 
 echo "======================================================================"
@@ -234,5 +236,5 @@ echo "  skipped : ${#SKIPPED[@]}  (already had results)"
 echo "  failed  : ${#FAILED[@]}"
 for f in ${FAILED[@]+"${FAILED[@]}"}; do echo "            - $f"; done
 echo
-echo "Now read it:  $PYTHON collect_step3.py"
+echo "Now read it:  $PYTHON collect_foothold.py"
 if (( ${#FAILED[@]} )); then exit 1; fi

@@ -121,11 +121,11 @@ class GaitPlanner:
         the midpoint raised by the swing height, land at the touchdown target.
         All arguments broadcast; ``s`` is the swing progress in [0, 1].
 
-        Deliberately **not** ``@torch.no_grad()`` (it was, before Step 3). The
+        Deliberately **not** ``@torch.no_grad()`` (it used to be). The
         foothold residual reaches the training objective only through ``p1``, so
         under the old decorator the correction arrived as a constant and its
         policy outputs received no gradient at all. Removing it costs nothing
-        when nothing upstream carries a graph: with the Step 3 flags off, ``p0``
+        when nothing upstream carries a graph: with the FOOT_* flags off, ``p0``
         is detached, ``p1`` comes from ``last_contact_z`` and the Isaac-side
         Raibert point, and the arithmetic -- hence every value -- is unchanged.
 
@@ -155,7 +155,7 @@ class GaitPlanner:
             return_vref: Also return the (currently zero) foot reference
                 velocity, matching the training loop's call signature.
             foothold_res: (B, 4, 2) per-leg foothold correction in the **body**
-                frame, metres, or None (Step 3). Rotated into the world frame by
+                frame, metres, or None. Rotated into the world frame by
                 the base yaw alongside the Raibert feed-forward term, so it means
                 "shift this foothold forward/back relative to where the robot is
                 facing" rather than a compass direction.
@@ -230,13 +230,13 @@ class GaitPlanner:
         p_stance[..., 2]   = self.last_contact_z
 
         # ---------- 5) SWING branch: quadratic parabola ----------
-        # Step 3: the planned foothold, Raibert plus the policy's per-leg correction. Published
+        # The planned foothold, Raibert plus the policy's per-leg correction. Published
         # attached, because it is the gradient path the foothold-quality loss samples along.
         _, self.foothold_plan_xy = self._raibert_touchdown_world(phases, foothold_res=foothold_res)
 
         # The *target* the swing (and so loss_foot) is built from drops that graph by default:
-        # with it attached, loss_foot has a degenerate minimum -- drag the target onto the foot
-        # instead of moving the foot. See STEP3_FOOTHOLD.md 4.3.
+        # with it attached, loss_foot has a degenerate minimum -- drag the target onto the
+        # foot instead of moving the foot.
         #
         # Detaching the sum is exactly equivalent to summing with a detached residual, because
         # the Raibert term itself is already grad-free (it is built from Isaac's base_pos and
@@ -263,8 +263,8 @@ class GaitPlanner:
 
         # End point p1 (world). Landing height: `last_contact_z` is the height this leg last
         # touched down at, which is the correct proprioceptive estimate for a blind robot and
-        # stale by exactly one riser on every stair step (CAMPAIGN_FINDINGS.md 22.6). Under
-        # cfg.foot_z_terrain it becomes the actual ground under the landing point.
+        # stale by exactly one riser on every stair step. Under cfg.foot_z_terrain it becomes
+        # the actual ground under the landing point.
         #
         # smooth=False on purpose: this is a target *value*, and the blurred field is a 0.2 m
         # Gaussian against a 0.31 m tread, which would aim the foot halfway between tread and
@@ -335,7 +335,7 @@ class GaitPlanner:
         Args:
             phases: (B, 4) absolute leg phases in radians.
             foothold_res: (B, 4, 2) body-frame per-leg correction in metres, or
-                None (Step 3). Added after the same body->world yaw rotation the
+                None. Added after the same body->world yaw rotation the
                 commanded velocity gets, which is the whole reason it is applied
                 here rather than at the call site: R_yaw is already built.
 
@@ -382,7 +382,7 @@ class GaitPlanner:
 
         p_land_xy_world = p_hip_xy_world + term_ff
 
-        # Step 3 foothold residual, body -> world through the same rotation as v_des.
+        # Foothold residual, body -> world through the same rotation as v_des.
         if foothold_res is not None:
             res_world = torch.einsum("bij,bnj->bni", R_yaw, foothold_res)   # (B,4,2)
             p_land_xy_world = p_land_xy_world + res_world

@@ -101,13 +101,13 @@ def project_gravity_to_body(q_wxyz, g, device):
 
 
 def tilt_barrier(g_body, g, cos_on):
-    """Soft one-sided barrier on body tilt, read off the gravity projection (Step 1c).
+    """Soft one-sided barrier on body tilt, read off the gravity projection.
 
     The training objective has no term on the tilt *angle*: ``loss_omega`` penalises
     roll/pitch angular *velocity*, and ``term_penalty`` only ever reaches the plotted
-    episodic reward, never the backward pass -- while every termination on the Rudin
-    curriculum is a tilt fall (CAMPAIGN_FINDINGS.md 18.4, 20.8). This is that missing
-    term, hinged so it stays silent during normal walking.
+    episodic reward, never the backward pass -- while in practice every termination on
+    the Rudin curriculum is a tilt fall. This is that missing term, hinged so it stays
+    silent during normal walking.
 
     Geometry, so the sign cannot drift: the gravity projection is
     ``g_body = R(q)^T @ (0, 0, -g)``, whose z component is ``-g * R[2,2]``. R's third row
@@ -145,10 +145,9 @@ def tilt_barrier(g_body, g, cos_on):
 
 
 # ---------------------------------------------------------------------------
-# Perceptive foothold (Step 3). Pure tensor maths, no Isaac / env dependency, so
+# Perceptive foothold. Pure tensor maths, no Isaac / env dependency, so
 # tests/test_foothold.py runs on a laptop with neither isaacgym nor a GPU -- the
-# same split that made tests/test_tilt_barrier.py possible for Step 1(c).
-# See STEP3_FOOTHOLD.md for why each of these exists.
+# same split that makes tests/test_tilt_barrier.py laptop-runnable.
 # ---------------------------------------------------------------------------
 
 def swing_chord_points(p0_xy, p1_xy, n):
@@ -196,7 +195,7 @@ def swing_apex_z(chord_z, p0_z, p1_z, h):
     The old midpoint is kept as a **lower bound**, so this can only ever raise
     the apex, never drop it below the arc the robot already flies. With flat
     terrain level with the endpoints the ``max`` selects the midpoint term and
-    the result is bit-identical to the pre-Step-3 formula -- which is what
+    the result is bit-identical to the terrain-blind formula -- which is what
     ``tests/test_foothold.py`` asserts, and what makes the flag inert when off.
 
     Args:
@@ -247,8 +246,8 @@ def foothold_quality(z_ring, z_centre):
 
     It is the **only** term that pushes the foothold residual toward *good*
     ground rather than merely reachable ground: the L2 prior only shrinks the
-    correction, and ``loss_foot``'s residual path is detached by default (see
-    STEP3_FOOTHOLD.md 4.3). Differentiable in the sampled heights, and through
+    correction, and ``loss_foot``'s residual path is detached by default.
+    Differentiable in the sampled heights, and through
     them -- via ``TerrainHeightSampler.sample_points`` -- in the foothold xy.
 
     **Sample it from the blurred field** (``smooth=True``, which is what

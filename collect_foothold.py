@@ -1,19 +1,19 @@
 #!/usr/bin/env python
-"""Read every Step 3 gate produced by ``run_step3.sh`` in one pass.
+"""Read every perceptive-foothold check produced by ``run_foothold.sh`` in one pass.
 
-    python collect_step3.py                     # all sections, with verdicts
-    python collect_step3.py --weight 0.05       # just FOOT_Q_W, for scripting
-    python collect_step3.py --res-weight 0.02   # just FOOT_RES_W, for scripting
+    python collect_foothold.py                     # all sections, with verdicts
+    python collect_foothold.py --weight 0.05       # just FOOT_Q_W, for scripting
+    python collect_foothold.py --res-weight 0.02   # just FOOT_RES_W, for scripting
 
 Stdlib only, so it runs on a laptop with no torch as happily as on the GPU box. Sections whose
 runs are missing say which stage produces them instead of failing.
 
-The gates, and why each one is here (see STEP3_FOOTHOLD.md):
+The checks, and why each one is here:
 
 1. SEED BAND  -- there is no TILT_W=0 Rudin replicate at 850 iterations on disk, so nothing else
-                 here has a noise floor to be read against. This is CAMPAIGN_FINDINGS 22.8 item 1
-                 and it is the prerequisite for every verdict below.
-2. PHASE 1    -- the terrain-aware swing target. The inertness arm must land inside the band from
+                 here has a noise floor to be read against, so it is the prerequisite for
+                 every verdict below.
+2. SWING      -- the terrain-aware swing target. The inertness arm must land inside the band from
                  section 1; the treatment arms are read on the PER-TERRAIN-TYPE table, not the
                  batch mean, because smooth slope is the internal control that this change should
                  NOT help.
@@ -21,16 +21,16 @@ The gates, and why each one is here (see STEP3_FOOTHOLD.md):
                  ``loss_on == loss_off + w*loss_fq`` is an exact arithmetic identity. The only
                  cheap check that the term is added, added linearly, and added at the right weight.
 4. CALIBRATION-- loss_fq / loss_fres are logged even at weight 0, so a run that used no weight
-                 measures the weights for one that will. Also carries the section 4.4 blur check.
-5. PHASE 2    -- the residual arms, read against Phase 1 and each other. foot_res_abs_mean is the
-                 "did it move at all" column: without it, "the correction did nothing" and "the
-                 correction stayed at zero" look identical, which is the mistake 22.4 avoided.
+                 measures the weights for one that will. Also carries the blur check.
+5. RESIDUAL   -- the residual arms, read against the swing-target arms and each other.
+                 foot_res_abs_mean is the "did it move at all" column: without it, "the
+                 correction did nothing" and "the correction stayed at zero" look identical.
 
 The per-terrain-type table is not in iters.csv. It comes from each run's own final_state.json,
 which train.py writes beside it (save_curriculum_snapshot); the run log is only a fallback for
-runs predating that file. Reading the log as the primary source silently dropped the pre-Step-3
+runs predating that file. Reading the log as the primary source silently dropped the untreated
 baseline row -- its log is on disk as diag20_blind_rudin_fwd_s0.log, not the run basename this
-script looked for -- and that row is the control every Phase 1 arm is read against. run_step3.sh
+script looked for -- and that row is the control every swing-target arm is read against. run_foothold.sh
 still tees every run: the log carries the startup banner and any traceback, which nothing else
 does.
 """
@@ -44,7 +44,7 @@ import re
 import sys
 
 # Run directories, all relative to --results-dir. Kept in one place so a rename is one edit.
-BASE = "diag20/blind_rudin_fwd_s0"           # the pre-Step-3 baseline, seed 0
+BASE = "diag20/blind_rudin_fwd_s0"           # the untreated baseline, seed 0
 SEEDS = ["diag21/rudin_fwd_w0_s1", "diag21/rudin_fwd_w0_s2"]
 P1 = [("inert (flags off)", "diag22/fz_off"),
       ("z only", "diag22/fz_z"),
@@ -106,8 +106,8 @@ def per_type(results_dir, run):
     that predate that file, and it is deliberately no longer the primary source: it keyed on
     the run basename, so the baseline -- logged as diag20_blind_rudin_fwd_s0.log -- vanished
     from the one table it is the control for, without saying so. final_state.json also carries
-    min_foot_clear_m, which 3.6 gate 4 reads and the log line only prints when contacts were
-    recorded.
+    min_foot_clear_m, which the clearance gate reads and the log line only prints when
+    contacts were recorded.
     """
     path = os.path.join(results_dir, run, "final_state.json")
     if os.path.isfile(path):
@@ -134,7 +134,7 @@ def per_type(results_dir, run):
 
 
 def missing(name, stage):
-    print("  not run yet -- ./run_step3.sh %s   (%s)" % (stage, name))
+    print("  not run yet -- ./run_foothold.sh %s   (%s)" % (stage, name))
 
 
 def band(values):
@@ -159,7 +159,7 @@ def section_seeds(rd):
     for name, rs in runs:
         print("     %-10s %14.4f %16.2f" % (name, final_level(rs), last200(rs, "n_falls")))
     if len(runs) < 3:
-        print("     [MISSING] only %d of 3 seeds -- ./run_step3.sh seeds" % len(runs))
+        print("     [MISSING] only %d of 3 seeds -- ./run_foothold.sh seeds" % len(runs))
         print("     Until all three exist there is no band, and 'the arm moved' cannot be said.")
         return None
     lv = band([final_level(rs) for _, rs in runs])
@@ -170,18 +170,18 @@ def section_seeds(rd):
     return {"level": (lv[0], lv[1]), "falls": (fl[0], fl[1])}
 
 
-def section_phase1(rd, bands):
-    print("\n2. PHASE 1 -- terrain-aware swing target")
+def section_swing(rd, bands):
+    print("\n2. SWING TARGET -- terrain-aware landing height and apex")
     present = [(n, r, rows(rd, r)) for n, r in P1]
     if not any(rs for _, _, rs in present):
-        return missing("diag22/*", "phase1")
+        return missing("diag22/*", "swing")
 
     print("     %-18s %12s %10s %9s %9s %11s"
           % ("arm", "final level", "falls/it", "vx", "loss_v", "minFootClr"))
     base = rows(rd, BASE)
     if base:
         print("     %-18s %12.4f %10.2f %9.3f %9.4f %11.4f"
-              % ("pre-Step-3 base", final_level(base), last200(base, "n_falls"),
+              % ("untreated base", final_level(base), last200(base, "n_falls"),
                  last200(base, "vx"), last200(base, "loss_v"), last200(base, "min_foot_clear")))
     for name, run, rs in present:
         if not rs:
@@ -216,7 +216,7 @@ def section_phase1(rd, bands):
     fam = ["smooth slope", "rough slope", "stairs up", "stairs down", "discrete obstacles"]
     hdr = "     %-18s" % "arm" + "".join("%14s" % f[:13] for f in fam)
     print(hdr)
-    for name, run in [("pre-Step-3 base", BASE)] + [(n, r) for n, r, _ in present]:
+    for name, run in [("untreated base", BASE)] + [(n, r) for n, r, _ in present]:
         d = per_type(rd, run)
         if not d:
             continue
@@ -234,12 +234,12 @@ def section_phase1(rd, bands):
             print("     [%s] %s: stairs at %s"
                   % ("PASS" if moved else "null", name,
                      " / ".join("%.2f" % v for v in stairs)))
-    # 3.6 gate 4. Baseline is -0.119 m stairs up / -0.118 m stairs down: the foot ends up about
+    # Baseline is -0.119 m stairs up / -0.118 m stairs down: the foot ends up about
     # a riser deep inside the step, which is exactly what the terrain-aware landing height exists
     # to fix. Less negative on the stair rows is the corroborating read on the level table above.
-    print("\n     Worst foot clearance per type (m) -- 3.6 gate 4, less negative is better:")
+    print("\n     Worst foot clearance per type (m) -- less negative is better:")
     print("     %-18s" % "arm" + "".join("%14s" % f[:13] for f in fam))
-    for name, run in [("pre-Step-3 base", BASE)] + [(n, r) for n, r, _ in present]:
+    for name, run in [("untreated base", BASE)] + [(n, r) for n, r, _ in present]:
         d = per_type(rd, run)
         if not d:
             continue
@@ -315,7 +315,7 @@ def section_calibration(rd):
           % (res_abs, cap, 100 * res_abs / cap if cap else float("nan")))
     if res_abs > 0.9 * cap:
         print("     [CHECK] the residual is saturating its tanh -- raise FOOT_RES_W or cut the cap.")
-    print("\n     Blur check (STEP3_FOOTHOLD.md 4.4): loss_fq must read HIGHER on the stair rows")
+    print("\n     Blur check: loss_fq must read HIGHER on the stair rows")
     print("     than on smooth slope. If they are equal, hm_loss_blur_cells is washing out the")
     print("     edge the term exists to find; re-run the probe with FOOT_Q_SMOOTH=0 and compare.")
     d = per_type(rd, PROBE)
@@ -324,8 +324,8 @@ def section_calibration(rd):
               + "  ".join("%s=%.2f" % (k[:12], v["level"]) for k, v in sorted(d.items())))
 
 
-def section_phase2(rd):
-    print("\n5. PHASE 2 -- the foothold residual arms")
+def section_residual(rd):
+    print("\n5. RESIDUAL -- the foothold residual arms")
     out = os.path.join(rd, "diag23")
     if not os.path.isdir(out):
         return missing("diag23/*", "arms")
@@ -365,10 +365,10 @@ def section_phase2(rd):
     print("       res_abs   -- did the correction move at all? 0 means the outputs stayed dead;")
     print("                    at the cap it saturated. Neither is a result about footholds.")
     print("       fq share  -- what the term cost. Far off 5%/15% means recalibrate, not retune.")
-    print("       stairs    -- the actual gate, same as Phase 1.")
+    print("       stairs    -- the actual gate, same as the swing-target section.")
     print("       vs detach -- fhold_nodetach vs the same weight says whether the degenerate")
-    print("                    minimum of 4.3 is real. Expect res_abs to grow and stairs not to.")
-    print("       res|y|    -- only meaningful on an axes=xy arm. 2.1 predicts it decays toward")
+    print("                    minimum is real. Expect res_abs to grow and stairs not to.")
+    print("       res|y|    -- only meaningful on an axes=xy arm. Expect it to decay toward")
     print("                    0 while res|x| holds: srbd.foot_positions_srbd has no lateral")
     print("                    DOF, so loss_foot can only punish a y correction, never reward")
     print("                    one. y staying large instead would falsify that and is the more")
@@ -400,12 +400,12 @@ def main():
         print(calib(rd, args.res_weight, "loss_fres"))
         return 0
 
-    print("Step 3 gates, from %s/" % rd)
+    print("Perceptive-foothold checks, from %s/" % rd)
     bands = section_seeds(rd)
-    section_phase1(rd, bands)
+    section_swing(rd, bands)
     section_wiring(rd)
     section_calibration(rd)
-    section_phase2(rd)
+    section_residual(rd)
     print("")
     return 0
 

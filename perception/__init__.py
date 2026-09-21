@@ -11,7 +11,7 @@ locomotion policy can be extended from a *blind* observation to a
   ``F.grid_sample`` -- natively differentiable w.r.t. the robot's planar
   position, usable as a privileged signal or a Rudin-style height scan.
 
-Design principles (see ``PERCEPTION_IMPLEMENTATION.md`` for the full rationale):
+Design principles:
 
 * **Forward-only.** None of the intended downstream uses needs a differentiable
   renderer *now* -- gradients flow through the CNN and the SRBD dynamics, not

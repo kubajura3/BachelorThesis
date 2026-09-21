@@ -240,9 +240,9 @@ def main():
 
     # env.obs_dim keeps the policy size consistent with the env configuration
     # (36 blind, 36+187 with the height scan).
-    # Step 3 made dim_action variable (12, or 12+4/12+8 for a foothold-residual policy), so it
-    # is read off the checkpoint's last layer rather than assumed -- otherwise loading one of
-    # those is a shape error. Old 12-output checkpoints still report 12.
+    # dim_action is not fixed (12, or 12+4/12+8 for a foothold-residual policy), so it is read
+    # off the checkpoint's last layer rather than assumed -- otherwise loading one of those is
+    # a shape error. Plain 12-output checkpoints still report 12.
     dim_action = policy_action_dim(args.weights)
     net = (VisionPolicy(dim_obs=env.obs_dim, dim_action=dim_action)
            if args.obs_mode == "depth" else None)

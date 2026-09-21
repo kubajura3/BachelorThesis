@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Step 1(c) soft tilt barrier -- everything that has to happen on the GPU box, in one queue.
+# Soft tilt barrier -- everything that has to happen on the GPU box, in one queue.
 #
-#   ./run_step1c.sh wiring       ~40 s   is the term actually wired into loss and gradient?
-#   ./run_step1c.sh control      ~7 min  flat same-code control pair (CAMPAIGN_FINDINGS 19.14)
-#   ./run_step1c.sh probe        ~2 min  Rudin TILT_W=0 run -- calibrates the weight where it matters
-#   ./run_step1c.sh arms         ~4 min  short flat arms at w=100 / w=300
-#   ./run_step1c.sh rudin-smoke  ~30 s   5 Rudin iterations at the probe-derived weight
-#   ./run_step1c.sh all                  all of the above, in dependency order (~14 min)
+#   ./run_tilt.sh wiring       ~40 s   is the term actually wired into loss and gradient?
+#   ./run_tilt.sh control      ~7 min  flat same-code control pair, for the noise floor
+#   ./run_tilt.sh probe        ~2 min  Rudin TILT_W=0 run -- calibrates the weight where it matters
+#   ./run_tilt.sh arms         ~4 min  short flat arms at w=100 / w=300
+#   ./run_tilt.sh rudin-smoke  ~30 s   5 Rudin iterations at the probe-derived weight
+#   ./run_tilt.sh all                  all of the above, in dependency order (~14 min)
 #
-# Then read every gate at once with:   python collect_step1c.py
+# Then read every gate at once with:   python collect_tilt.py
 #
 # Same conventions as run_campaign.sh / run_saliency.sh: sequential (one GPU), resumable (a
 # run whose RUN_DIR already has summary.json is skipped -- delete the folder to force a redo),
 # and deliberately NOT `set -e` so one failure does not take the queue with it. Every run is
-# tee'd to results/logs/, which is the 19.14 housekeeping lesson.
+# tee'd to results/logs/, so the startup banner and any traceback survive the run.
 
 set -uo pipefail
 
@@ -24,10 +24,10 @@ OUT="${OUT:-$RESULTS/diag21}"
 SEED="${SEED:-0}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-3600}"
 
-# Tier 2 weights, calibrated off results/diag21/flat_omni_w0's last 200 iterations: mean loss
-# 2.109, mean loss_tilt 1.145e-3, so these put the term at ~5% and ~15% of the objective.
-# NOT the 1e3-1e4 the plan guessed -- that assumed ~1% activation and the measurement says
-# 4.8-7.1%.
+# Flat-arm weights, calibrated off results/diag21/flat_omni_w0's last 200 iterations: mean
+# loss 2.109, mean loss_tilt 1.145e-3, so these put the term at ~5% and ~15% of the objective.
+# Not the 1e3-1e4 a first guess suggests -- that assumes ~1% activation and the measurement
+# says 4.8-7.1%.
 W_LO="${W_LO:-100}"
 W_HI="${W_HI:-300}"
 
@@ -109,18 +109,18 @@ stage_wiring() {
 }
 
 stage_control() {
-  # The flat control pair 19.14's second caveat asks for and that does not exist on disk:
-  # diag19/flat_omni_s0 is commit 924523c with cmd_style unset, a different arm entirely.
-  # Identical to flat_omni_w0 in every respect, so whatever it differs by IS the flat noise
-  # floor. Doubles as the second sample that gives the Tier 2 arms a spread to be read
-  # against -- without it n_falls on 16 envs is uninterpretable.
+  # The flat control pair that does not exist on disk: diag19/flat_omni_s0 is commit 924523c
+  # with cmd_style unset, a different arm entirely. Identical to flat_omni_w0 in every respect,
+  # so whatever it differs by IS the flat noise floor. Doubles as the second sample that gives
+  # the short arms a spread to be read against -- without it n_falls on 16 envs is
+  # uninterpretable.
   add_run "$OUT/flat_omni_w0_ctrl" "MODE=blind_omni SEED=$SEED ITERS=1000 NUM_ENVS=16 TILT_W=0"
   drain_queue
 }
 
 stage_probe() {
-  # loss_tilt is logged at weight 0, so this measures the term's size in the regime Tier 3
-  # actually runs in, without spending a Tier 3 run on it. 100 iterations is the right window
+  # loss_tilt is logged at weight 0, so this measures the term's size in the regime the full
+  # terrain run uses, without spending a full run on it. 100 iterations is the right window
   # rather than a truncation: terrain_level goes 2.485 -> 0.889 over exactly these iterations,
   # so this is the collapse the barrier is meant to interrupt. Calibrating on flat instead
   # would extrapolate from ground where the term is silent in 47% of iterations.
@@ -129,8 +129,8 @@ stage_probe() {
 }
 
 stage_arms() {
-  # Short Tier 2. 300 iterations at 16 envs is ~2 min each and enough to read direction.
-  # collect_step1c.py compares them against results/diag21/flat_omni_w0 over the same
+  # Short flat arms. 300 iterations at 16 envs is ~2 min each and enough to read direction.
+  # collect_tilt.py compares them against results/diag21/flat_omni_w0 over the same
   # iteration window, never against their own first iterations.
   add_run "$OUT/flat_omni_w${W_LO}_short" "MODE=blind_omni SEED=$SEED ITERS=300 NUM_ENVS=16 TILT_W=$W_LO"
   add_run "$OUT/flat_omni_w${W_HI}_short" "MODE=blind_omni SEED=$SEED ITERS=300 NUM_ENVS=16 TILT_W=$W_HI"
@@ -139,15 +139,15 @@ stage_arms() {
 
 stage_rudin_smoke() {
   # 5 iterations on the terrain path at the weight the probe implies, before the 14-minute
-  # Tier 3 run is committed to it. Catches the two failures that can only show up on Rudin: a
+  # terrain run is committed to it. Catches the two failures that can only show up on Rudin: a
   # NaN from the barrier meeting a real fall, and a realised share wildly off the prediction.
   local w
   w="${W_RUDIN:-}"
   if [[ -z "$w" ]]; then
-    w="$("$PYTHON" collect_step1c.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)"
+    w="$("$PYTHON" collect_tilt.py --weight 0.05 --results-dir "$RESULTS" 2>/dev/null)"
   fi
   if [[ -z "${w:-}" || "$w" == "0" ]]; then
-    echo "[$(stamp)] SKIP  rudin-smoke -- no weight available; run './run_step1c.sh probe' first"
+    echo "[$(stamp)] SKIP  rudin-smoke -- no weight available; run './run_tilt.sh probe' first"
     return
   fi
   echo "[$(stamp)] rudin-smoke weight from probe (5% of loss): TILT_W=$w"
@@ -178,5 +178,5 @@ echo "  skipped : ${#SKIPPED[@]}  (already had results)"
 echo "  failed  : ${#FAILED[@]}"
 for f in ${FAILED[@]+"${FAILED[@]}"}; do echo "            - $f"; done
 echo
-echo "Now read it:  $PYTHON collect_step1c.py"
+echo "Now read it:  $PYTHON collect_tilt.py"
 if (( ${#FAILED[@]} )); then exit 1; fi

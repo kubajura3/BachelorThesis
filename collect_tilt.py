@@ -1,28 +1,29 @@
 #!/usr/bin/env python
-"""Read every Step 1(c) gate produced by ``run_step1c.sh`` in one pass.
+"""Read every tilt-barrier check produced by ``run_tilt.sh`` in one pass.
 
-    python collect_step1c.py                    # all five sections, with verdicts
-    python collect_step1c.py --weight 0.05      # just the Rudin weight, for scripting
+    python collect_tilt.py                    # all five sections, with verdicts
+    python collect_tilt.py --weight 0.05      # just the Rudin weight, for scripting
 
 Stdlib only, so it runs on a laptop with no torch as happily as on the GPU box. Sections whose
 runs are missing say which stage produces them instead of failing.
 
-The five gates, and why each one is here:
+The five checks, and why each one is here:
 
 1. WIRING     -- at iteration 0 the two wiring runs share an identical rollout (the row is
                  logged before the first optimiser step), so ``loss_on == loss_off + w*loss_tilt``
                  is an exact arithmetic identity. It is the only cheap check that the term is
                  added, added linearly, and added with the weight that was asked for.
-2. NOISE      -- this sim is not bit-reproducible (CAMPAIGN_FINDINGS.md 19.14). The same-code
-                 control pair is what turns "the runs differ" into a number, and 19.14's second
-                 caveat says the Rudin floor must not be reused for flat ground.
+2. NOISE      -- this sim is not bit-reproducible. The same-code control pair is what turns
+                 "the runs differ" into a number, and the Rudin floor must not be reused for
+                 flat ground.
 3. CALIBRATION-- loss_tilt is logged even at weight 0, so a run that used no barrier measures
                  the weight for one that will. Flat ground is the wrong regime to read it from;
                  the Rudin probe is the right one.
-4. ARMS       -- the short Tier 2 arms, read against the flat baseline over the SAME iteration
+4. ARMS       -- the short flat arms, read against the flat baseline over the SAME iteration
                  window and against the noise band from section 2.
 5. RUDIN SMOKE-- five terrain iterations at the calibrated weight: no NaN, and a realised share
-                 close to what section 3 predicted, before Tier 3 is committed to it.
+                 close to what section 3 predicted, before the full terrain run is
+                 committed to it.
 """
 
 import argparse
@@ -35,7 +36,7 @@ import sys
 # Run directories, all relative to --results-dir. Kept in one place so a rename is one edit.
 BASE = "diag21/flat_omni_w0"                 # the TILT_W=0 baseline already on disk
 CTRL = "diag21/flat_omni_w0_ctrl"            # stage `control`
-OLD = "diag19/flat_omni_gatefix_s0"          # the pre-1c run the baseline was compared against
+OLD = "diag19/flat_omni_gatefix_s0"          # the pre-barrier run the baseline was compared against
 WIRE_OFF = "diag21/wire_w0"                  # stage `wiring`
 WIRE_ON = "diag21/wire_won"
 PROBE = "diag21/rudin_fwd_w0_probe"          # stage `probe`
@@ -96,7 +97,7 @@ def reldev(a, b):
 
 
 def missing(name, stage):
-    print("  not run yet -- ./run_step1c.sh %s   (%s)" % (stage, name))
+    print("  not run yet -- ./run_tilt.sh %s   (%s)" % (stage, name))
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +118,8 @@ def section_wiring(rd):
 
     shift = w * lt_off
     resid = abs(l_on - (l_off + shift))
-    # The float floor on `loss` at iteration 0 is ~1e-6 relative (19.14, and the flat
-    # baseline-vs-diag19 pair). 1e-4 is two orders above that and still ~1e-3 of the shift.
+    # The float floor on `loss` at iteration 0 is ~1e-6 relative, measured from the flat
+    # baseline-vs-diag19 pair. 1e-4 is two orders above that and still ~1e-3 of the shift.
     tol = 1e-4 * abs(l_off)
 
     print("     TILT_W = %-10g TILT_ON = %s   (iteration 0, before the first update)"
@@ -158,7 +159,7 @@ def section_wiring(rd):
 # 2. Noise floor
 # ---------------------------------------------------------------------------
 def section_noise(rd):
-    print("\n2. NOISE FLOOR -- the flat control pair (19.14 caveat 2)")
+    print("\n2. NOISE FLOOR -- the flat control pair")
     base, ctrl, old = rows(rd, BASE), rows(rd, CTRL), rows(rd, OLD)
     if not base:
         return missing(BASE, "(baseline already on disk?)")
@@ -184,18 +185,18 @@ def section_noise(rd):
 
     # Only iteration 0 can decide this. Both runs roll out the same initial policy there, so
     # the two columns measure the same thing. From iteration 1 the trajectories have already
-    # forked and every later row is chaos amplifying that fork -- 19.14 measured ~500x growth
+    # forked and every later row is chaos amplifying that fork -- about 500x growth was seen
     # in 30 iterations on Rudin, and this is a 16-env flat run, which averages even less.
     if verdict is None:
         print("     no diag19 run to compare against -- floor only")
     else:
         ok, do_l, dc_l = verdict
-        print("     [%s] iteration 0: across-1c deviation %.2e vs same-code floor %.2e"
+        print("     [%s] iteration 0: across-barrier deviation %.2e vs same-code floor %.2e"
               % ("PASS" if ok else "FAIL", do_l, dc_l))
         print("         Later rows are informational: the trajectories have forked by then and")
         print("         chaos, not the tilt term, sets their size.")
 
-    print("\n     Falls, which is what Tier 2 must NOT be read on:")
+    print("\n     Falls, which is what the flat arms must NOT be read on:")
     for name, rs in (("base", base), ("ctrl", ctrl), ("diag19", old)):
         if not rs:
             continue
@@ -206,7 +207,7 @@ def section_noise(rd):
         lo_b, lo_c = max(0, len(base) - 200), max(0, len(ctrl) - 200)
         a, b = mean(base, "n_falls", lo_b), mean(ctrl, "n_falls", lo_c)
         spread = abs(a - b) / max(a, b, 1e-9)
-        print("       same-policy spread on last200 falls/iter: %.0f%%  <- the Tier 2 noise band"
+        print("       same-policy spread on last200 falls/iter: %.0f%%  <- the flat noise band"
               % (100 * spread))
 
 
@@ -226,7 +227,7 @@ def rudin_weight(rd, frac):
 
 
 def section_calibration(rd):
-    print("\n3. CALIBRATION -- the weight, read in the regime Tier 3 runs in")
+    print("\n3. CALIBRATION -- the weight, read in the regime the terrain run uses")
     p = rows(rd, PROBE)
     if not p:
         return missing(PROBE, "probe")
@@ -240,19 +241,19 @@ def section_calibration(rd):
     print("     terrain_level  %s"
           % "  ".join("i%d=%.3f" % (i, float(p[i]["terrain_level"]))
                       for i in (0, 25, 50, 75, len(p) - 1) if i < len(p)))
-    print("     falls/iter     %.2f over the probe   (Tier 3 baseline is 13.06, last200 of"
+    print("     falls/iter     %.2f over the probe   (terrain baseline is 13.06, last200 of"
           " diag20/blind_rudin_fwd_s0)" % mean(p, "n_falls"))
-    print("     -> Tier 3 weight at 5%% of loss: %d      at 15%%: %d"
+    print("     -> terrain weight at 5%% of loss: %d      at 15%%: %d"
           % (rudin_weight(rd, 0.05), rudin_weight(rd, 0.15)))
     print("     Compare against the flat numbers (w=100 / w=300). If these differ by more than"
-          " ~3x,\n     the flat calibration was the wrong anchor and Tier 3 should use these.")
+          " ~3x,\n     the flat calibration was the wrong anchor and the terrain run should use these.")
 
 
 # ---------------------------------------------------------------------------
 # 4. Flat arms
 # ---------------------------------------------------------------------------
 def section_arms(rd):
-    print("\n4. FLAT ARMS -- short Tier 2, all read over iterations %d-%d" % (ARM_LO, ARM_HI))
+    print("\n4. FLAT ARMS -- short arms, all read over iterations %d-%d" % (ARM_LO, ARM_HI))
     base = rows(rd, BASE)
     if not base:
         return missing(BASE, "(baseline already on disk?)")
@@ -289,7 +290,7 @@ def section_arms(rd):
     print("       frac/gproj -- the term working. Both must FALL against the w=0 rows, and by")
     print("                     more than the w=0-vs-ctrl gap on the same line.")
     print("       loss_v     -- the cost. If it rises much, the barrier is buying uprightness")
-    print("                     by refusing to walk, which fails Tier 2 whatever falls does.")
+    print("                     by refusing to walk, which fails the arm whatever falls does.")
     print("       falls/it   -- ignore on flat at 16 envs; section 2 prints why.")
 
 
@@ -313,7 +314,7 @@ def section_smoke(rd):
               % (r["iter"], vals["loss"], vals["loss_tilt"], vals["tilt_frac_active"],
                  vals["grad_norm"], 100 * share))
     print("     [%s] no NaN/inf on the terrain path" % ("PASS" if not bad else "FAIL %s" % bad))
-    print("     -> if share is in the 3-8% band, Tier 3 can run at this weight:")
+    print("     -> if share is in the 3-8% band, the terrain run can use this weight:")
     print("        MODE=blind_rudin_fwd TILT_W=%g SEED=0 ITERS=850 NUM_ENVS=1024 \\" % w)
     print("          RUN_DIR=results/diag21/rudin_fwd_w%g python train.py \\" % w)
     print("          2>&1 | tee results/logs/diag21_rudin_fwd_w%g.log" % w)
@@ -334,7 +335,7 @@ def main():
         print(rudin_weight(rd, args.weight))
         return 0
 
-    print("Step 1(c) gates, from %s/" % rd)
+    print("Tilt-barrier checks, from %s/" % rd)
     section_wiring(rd)
     section_noise(rd)
     section_calibration(rd)

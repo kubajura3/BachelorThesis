@@ -15,7 +15,7 @@ def resolve_cmd_style(cfg):
     Module-level on purpose: ``train.py`` needs the same answer to decide whether a run carries
     a live yaw command, and resolving it independently there is precisely how ``blind_omni``
     ended up drawing Rudin yaw commands while the loss still measured yaw against a fixed reset
-    heading (CAMPAIGN_FINDINGS.md 19.9).
+    heading.
     """
     style = getattr(cfg, "cmd_style", None)
     if style is not None:
@@ -91,13 +91,12 @@ DIAG_NO_TERM = _flag("DIAG_NO_TERM", False)
 # ===============================
 TILT_W = float(os.getenv("TILT_W", "0.0"))
 TILT_ON = float(os.getenv("TILT_ON", "0.6"))
-# Step 1(c): the differentiable stand-in for `term_penalty`, which only ever reached
-# episodic_reward and was never backpropagated -- so the objective said nothing about
-# falling over while every termination on the Rudin curriculum was a tilt fall
-# (CAMPAIGN_FINDINGS.md 18.4, 20.8). train.py hinges relu(cos(TILT_ON) - cos(tilt))^2 off
-# the gravity projection it already computes. TILT_W = 0 leaves the loss expression
-# untouched, so a plain run is unchanged, and the term's raw value is still logged --
-# which is what lets a weight be calibrated from a run that did not use one.
+# The differentiable stand-in for `term_penalty`, which only ever reached episodic_reward
+# and was never backpropagated -- so the objective said nothing about falling over, while
+# in practice every termination on the Rudin curriculum is a tilt fall. train.py hinges
+# relu(cos(TILT_ON) - cos(tilt))^2 off the gravity projection it already computes. TILT_W = 0
+# leaves the loss expression untouched, so a plain run is unchanged, and the term's raw value
+# is still logged -- which is what lets a weight be calibrated from a run that did not use one.
 # TILT_ON = 0.6 rad (34 deg) sits above the ~16 deg lean the trained policy walks with, so
 # the term is inert in normal walking rather than a re-weighting of loss_gproj, and below
 # the 0.9 rad (51.6 deg) fall_tilt_thresh, so it engages while righting is still possible.
@@ -105,18 +104,17 @@ TILT_ON = float(os.getenv("TILT_ON", "0.6"))
 # EnvCfg() and would silently win over the variable.
 
 # ===============================
-# Perceptive foothold  (Step 3) -- see STEP3_FOOTHOLD.md
+# Perceptive foothold
 # ===============================
-# Phase 1: where the swing foot is aimed. gait.py lands it at `last_contact_z`, the height
-# that leg last touched down at, which on stairs is stale by exactly one riser every step --
-# and row 0 of the Rudin curriculum is already 5 cm risers on a 0.31 m tread
-# (terrain.py make_terrain). CAMPAIGN_FINDINGS.md 22.6 is the measurement behind this.
+# Where the swing foot is aimed. gait.py lands it at `last_contact_z`, the height that leg
+# last touched down at, which on stairs is stale by exactly one riser every step -- and row 0
+# of the Rudin curriculum is already 5 cm risers on a 0.31 m tread (terrain.py make_terrain).
 # Both need use_perception=True: env.terrain_height_diff asserts on it.
 FOOT_Z_TERRAIN = _flag("FOOT_Z_TERRAIN", False)      # land at the terrain, not last_contact_z
 FOOT_APEX_TERRAIN = _flag("FOOT_APEX_TERRAIN", False)  # clear max(terrain) under the swing chord
 FOOT_APEX_N = int(os.getenv("FOOT_APEX_N", "5"))     # chord samples for the apex (>=2)
 
-# Phase 2: the policy's per-leg foothold correction, appended to the 12 joint offsets.
+# The policy's per-leg foothold correction, appended to the 12 joint offsets.
 # FOOT_RES=1 adds 4 outputs (per-leg sagittal dx); FOOT_RES_Y additionally adds 4 lateral
 # outputs and is off because srbd.foot_positions_srbd has no lateral DOF (off_body y is
 # identically 0), so loss_foot cannot reward a y correction -- only punish it.
@@ -133,9 +131,9 @@ FOOT_RES_MAX = float(os.getenv("FOOT_RES_MAX", "0.10"))
 # a tuning knob: with the target differentiable in the correction, loss_foot has a degenerate
 # minimum -- drag the target to wherever the foot already is instead of moving the foot.
 # Detaching removes that channel by construction. The cost is that the residual is then shaped
-# by loss_fq and its prior only, not by downstream outcome, which 22.5 showed is a 48 ms
-# window and empirically weak anyway. FOOT_RES_DETACH=0 measures whether the degenerate
-# solution actually appears.
+# by loss_fq and its prior only, not by downstream outcome -- which reaches back only one
+# 48 ms window and is empirically weak anyway. FOOT_RES_DETACH=0 measures whether the
+# degenerate solution actually appears.
 FOOT_RES_DETACH = _flag("FOOT_RES_DETACH", True)
 # Foothold-quality probe: ring radius (m) and point count. 0.06 m is a foot plus margin
 # against a 0.31 m tread.
@@ -158,8 +156,8 @@ FOOT_Q_RING = int(os.getenv("FOOT_Q_RING", "8"))
 # everywhere flat. The 0.2 m sigma is broad against a 0.31 m tread, which is the real cost of
 # this choice -- FOOT_Q_SMOOTH=0 runs the exact-field arm if it is worth measuring.
 FOOT_Q_SMOOTH = _flag("FOOT_Q_SMOOTH", True)
-# Loss weights, both 0 (inert) by default. Calibrate them from a weights-0 probe run the way
-# 22.3 calibrated TILT_W -- loss_fq / loss_fres are logged even at weight 0 for exactly that.
+# Loss weights, both 0 (inert) by default. Calibrate them from a weights-0 probe run, the same
+# way TILT_W is calibrated -- loss_fq / loss_fres are logged even at weight 0 for exactly that.
 FOOT_Q_W = float(os.getenv("FOOT_Q_W", "0.0"))
 FOOT_RES_W = float(os.getenv("FOOT_RES_W", "0.0"))
 
@@ -346,13 +344,13 @@ class EnvCfg:
     # diagnostic run can move them from the environment (see FALL_H_THRESH / DIAG_NO_TERM).
     fall_height_thresh: float = FALL_H_THRESH   # [m] base height above the ground beneath it
     fall_tilt_thresh: float = 0.9               # [rad] |roll| or |pitch|
-    # Soft tilt barrier (Step 1c); defaults come from the TILT_W / TILT_ON env vars above.
+    # Soft tilt barrier; defaults come from the TILT_W / TILT_ON env vars above.
     # tilt_w = 0 makes the term inert, tilt_on is the tilt angle where it starts pushing.
     tilt_w: float = TILT_W
     tilt_on: float = TILT_ON
 
-    # Perceptive foothold (Step 3); defaults come from the FOOT_* env vars above. Every one is
-    # off/zero by default, so a run that sets none of them reproduces the pre-Step-3 numbers.
+    # Perceptive foothold; defaults come from the FOOT_* env vars above. Every one is
+    # off/zero by default, so a run that sets none of them reproduces the earlier numbers.
     foot_z_terrain: bool = FOOT_Z_TERRAIN
     foot_apex_terrain: bool = FOOT_APEX_TERRAIN
     foot_apex_n: int = FOOT_APEX_N

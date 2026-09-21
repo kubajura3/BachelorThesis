@@ -147,10 +147,10 @@ def _setup_physx_stable(sim_params, use_gpu=True, terrain_type="flat"):
     #   "The application needs to increase PxgDynamicsMemoryConfig::foundLostAggregatePairsCapacity
     #    to 1383623, otherwise the simulation will miss interactions"
     # "Miss interactions" means dropped contact pairs, i.e. robots that fall through the mesh --
-    # 228 of 2048 in the section 15.5 run, all of them in columns 10-19. legged_gym runs the same
+    # 228 of 2048 in one measured run, all of them in columns 10-19. legged_gym runs the same
     # grid with default_buffer_size_multiplier = 5 and max_gpu_contact_pairs = 2**23; this repo
     # had 2.0 and never set the contact-pair cap at all. Gated on the terrain type so the flat
-    # bench (sections 7 / 9.1) keeps its exact solver configuration.
+    # bench keeps its exact solver configuration.
     if terrain_type == "rudin":
         if hasattr(ph, "default_buffer_size_multiplier"):
             ph.default_buffer_size_multiplier = 5.0

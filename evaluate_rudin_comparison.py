@@ -45,7 +45,7 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 def policy_action_dim(weight_path: str, default: int = 12) -> int:
     """Action width a checkpoint was trained with, read off its last layer.
 
-    Step 3 made ``dim_action`` variable: a foothold-residual policy emits
+    ``dim_action`` is not fixed: a foothold-residual policy emits
     ``12 + 4`` (or ``+8``) outputs instead of 12, and constructing the wrong
     width turns a checkpoint load into a shape error. Both policies end in
     ``net.<last>.weight`` of shape (dim_action, hidden), so the file answers the
@@ -96,11 +96,11 @@ def load_policy(policy: torch.nn.Module, weight_path: str, device: torch.device)
 
 
 def corrupt_channel(x, mode, perm):
-    """Corrupt a terrain-perception channel for the THESIS_PLAN sec 6.8 saliency diagnostic.
+    """Corrupt a terrain-perception channel for the saliency diagnostic.
 
     Invariance of the policy's behaviour to this corruption is direct evidence that it learned to
     disregard the terrain signal, which distinguishes "the information does not help" from "the
-    information is present and structurally unusable" (THESIS_PLAN sec E.3).
+    information is present and structurally unusable".
 
     Args:
         x: (B, ...) terrain channel -- the height-scan slice of the obs, or the depth image.
@@ -119,10 +119,10 @@ def corrupt_channel(x, mode, perm):
         # For the height scan this is semantically clean: get_obs() emits clip(hm - h0, -1, 1),
         # so zero means "flat ground at nominal height" (env.py get_obs). For a depth image it
         # means "surface at zero range", which is NOT neutral -- for --obs-mode depth, shuffle is
-        # the primary condition and zero only a sanity check. See the plan's depth caveat.
+        # the primary condition and zero only a sanity check.
         return torch.zeros_like(x)
     if mode == "shuffle":
-        # Substitutes each robot's terrain with another environment's, per sec 6.8. Preserves the
+        # Substitutes each robot's terrain with another environment's. Preserves the
         # marginal distribution exactly, so it controls for "the policy just needs input of the
         # right magnitude" in a way that zeroing does not.
         return x[perm]
@@ -151,7 +151,7 @@ def parse_args():
                         "36-D obs + depth image through the VisionPolicy CNN. Must match "
                         "how the weights were trained.")
     p.add_argument("--corrupt", type=str, default="none", choices=["none", "zero", "shuffle"],
-                   help="Terrain-input corruption for the sec 6.8 saliency diagnostic: none "
+                   help="Terrain-input corruption for the saliency diagnostic: none "
                         "(clean baseline), zero, or shuffle (robot i sees robot perm(i)'s "
                         "terrain). Requires an obs-mode that has a terrain channel.")
     p.add_argument("--corrupt-seed", type=int, default=0,
@@ -232,7 +232,7 @@ def main():
         # Wiring check: does the corruption actually reach the policy? Compares the action the
         # policy emits on step 0 with clean versus corrupted input. A delta of exactly 0 under
         # --corrupt zero/shuffle means the channel slice is wrong and the corruption is landing on
-        # nothing, which would silently produce a fake null result in the sec 6.8 diagnostic.
+        # nothing, which would silently produce a fake null result in the diagnostic.
         # All three modes are checked in this one process: building the Rudin trimesh is the
         # dominant cost of a short run, so looping here instead of re-invoking the script per
         # mode turns three terrain builds into one.
@@ -275,10 +275,10 @@ def main():
     ang_err_sum = 0.0
     level_sum = 0.0
     metric_steps = 0
-    # Corruption magnitude over the metric window. Without these the sec 6.8 null is
-    # uninterpretable: a policy that ignores the terrain and a corruption that changed nothing
-    # (because the robots sat on level ~0, where there is almost no geometry -- CAMPAIGN_FINDINGS
-    # sec 19.8) produce identical metrics. Reported so the two can be told apart.
+    # Corruption magnitude over the metric window. Without these the null is uninterpretable:
+    # a policy that ignores the terrain and a corruption that changed nothing (because the robots
+    # sat on level ~0, where there is almost no geometry) produce identical metrics. Reported so
+    # the two can be told apart.
     corrupt_l1_sum = 0.0
     channel_l1_sum = 0.0
     chan_steps = 0

@@ -206,10 +206,10 @@ class RealQuadEnv:
         # Shared-terrain modes place robots in world coordinates (_assign_rudin_origins ->
         # _write_spawn_pose), so they must not also sit inside a per-env spatial grid: with
         # spacing > 0 the envs span a bounded box that does not cover the curriculum grid,
-        # and the trimesh stops generating contacts past its edge (see CAMPAIGN_FINDINGS
-        # section 14 -- collision died past y ~ 48 m, 90% of robots never touched the ground).
-        # legged_gym's _create_envs uses env_lower = env_upper = 0 for exactly this reason.
-        # Flat keeps 2.0 so the Experiment 1 bench numbers stay bit-identical.
+        # and the trimesh stops generating contacts past its edge: collision died past y ~ 48 m
+        # and 90% of robots never touched the ground. legged_gym's _create_envs uses
+        # env_lower = env_upper = 0 for exactly this reason. Flat keeps 2.0 so the
+        # Experiment 1 bench numbers stay bit-identical.
         spacing = 0.0 if self.cfg.terrain_type == "rudin" else 2.0
         lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         upper = gymapi.Vec3(spacing, spacing, spacing)
@@ -341,10 +341,10 @@ class RealQuadEnv:
         # exactly this (`start_pose.p = self.env_origins[i]`); this repo created every actor at
         # (0, 0, h0) and only teleported it onto the grid afterwards through the root-state
         # tensor. Under the GPU pipeline that is not equivalent: the trimesh only produced
-        # contacts inside a narrow band of world y (CAMPAIGN_FINDINGS section 15 -- at
-        # spacing = 0 columns 15-16 stood at ~100 % contact and every other column sat at
-        # exactly 0, free-falling the full 0.19 m fall-rule budget through phantom ground).
-        # Running it here also lets _sample_spawn_xy cache these origins as the spawn points.
+        # contacts inside a narrow band of world y -- at spacing = 0 columns 15-16 stood at
+        # ~100 % contact and every other column sat at exactly 0, free-falling the full 0.19 m
+        # fall-rule budget through phantom ground. Running it here also lets _sample_spawn_xy
+        # cache these origins as the spawn points.
         rudin = (self.cfg.terrain_type == "rudin" and self.terrain is not None
                  and getattr(self.terrain, "env_origins", None) is not None)
         if rudin:
@@ -380,8 +380,8 @@ class RealQuadEnv:
             actor_index = self.gym.get_actor_index(env_ptr, actor_handle, gymapi.DOMAIN_SIM)
             self.actor_indices.append(actor_index)
 
-        # Diagnostic (section 15): what Isaac actually did with the env grid, and where the actors
-        # were *created*. The section 14 fix zeroed `spacing` without ever checking the resulting
+        # Diagnostic: what Isaac actually did with the env grid, and where the actors were
+        # *created*. The first fix above zeroed `spacing` without ever checking the resulting
         # env origins, which is why the contact band moved instead of disappearing.
         ix = [o[0] for o in isaac_origins]
         iy = [o[1] for o in isaac_origins]
@@ -599,12 +599,12 @@ class RealQuadEnv:
         """Differentiable terrain height at per-leg points, (B, 4, ...,  2) -> (B, 4, ...).
 
         Thin shape adapter over :meth:`terrain_height_diff`, which wants a flat (B, N, 2).
-        Everything in Step 3 queries the terrain per leg -- 4 landing points, 4 x n chord
+        The foothold code queries the terrain per leg -- 4 landing points, 4 x n chord
         samples, 4 x k ring points -- and each would otherwise repeat the same reshape.
         Folding the leg and sample axes into one N keeps it to a single ``grid_sample``.
 
-        ``smooth`` defaults to **False** here, the opposite of ``terrain_height_diff``. The
-        Step 3 callers want terrain *values* (where to put the foot) or a spread between
+        ``smooth`` defaults to **False** here, the opposite of ``terrain_height_diff``. These
+        callers want terrain *values* (where to put the foot) or a spread between
         samples, not the smoothed slope the clearance loss reads: ``hm_loss_blur_cells = 2.0``
         at ``horizontal_scale = 0.1`` is a 0.2 m Gaussian against a 0.31 m stair tread, which
         would aim the foot halfway between tread and riser near every edge.
@@ -718,7 +718,7 @@ class RealQuadEnv:
         # Which command distribution to draw from -- see resolve_cmd_style(). Factored out of
         # this method so train.py can ask the same question when it decides whether a run has a
         # live yaw command; when the two were resolved independently they drifted apart, which
-        # is what left blind_omni penalising its own yaw command (CAMPAIGN_FINDINGS.md 19.9).
+        # is what left blind_omni penalising its own yaw command.
         style = resolve_cmd_style(cfg)
 
         if style == "rudin":
@@ -850,9 +850,9 @@ class RealQuadEnv:
         # robots that covered less than half their commanded distance go to simpler terrain
         cmd_speed = torch.norm(self.cmd_rand[env_ids, 0:2], dim=1)
         move_down = (distance < cmd_speed * self.max_episode_length_s * 0.5) & (~move_up)
-        # Diagnostic counters: the campaign could not tell a level collapse caused by robots
-        # falling from one caused by the promote/demote rule itself, because neither direction
-        # was ever counted. Accumulated as tensors and read once per iteration by the training
+        # Diagnostic counters: without them a level collapse caused by robots falling cannot
+        # be told apart from one caused by the promote/demote rule itself, because neither
+        # direction was ever counted. Accumulated as tensors and read once per iteration by the training
         # loop (which zeroes them), so this adds no GPU->CPU sync inside the step loop.
         self.n_move_up += move_up.sum()
         self.n_move_down += move_down.sum()

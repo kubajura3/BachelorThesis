@@ -85,8 +85,8 @@ COLOR_BY_NAME = {
     "blind_rudin": 0, "hobs": 1, "hloss": 2, "height": 3, "depth": 4, "blind": 5,
 }
 LABEL = {
-    "blind_rudin": "blind", "hobs": "height map (obs)", "hloss": "gradient (loss)",
-    "height": "gradient + map", "depth": "camera",
+    "blind_rudin": "blind_rudin", "hobs": "hobs", "hloss": "hloss (gradient)",
+    "height": "height (gradient + obs)", "depth": "depth (camera)",
 }
 
 # Campaign small multiples. Each panel is one controlled comparison, so it carries at
@@ -97,15 +97,15 @@ LABEL = {
 CAMPAIGN_PANELS = [
     ("Observation and commands", "terrain in the observation; random vs. forward commands",
      ["height map (obs)", "random commands"]),
-    ("Attitude - Step 1(c)", "soft tilt barrier, two weights",
+    ("Attitude", "soft tilt barrier, two weights",
      ["tilt w=16", "tilt w=48"]),
-    ("Swing target - Step 3 Phase 1", "terrain-aware landing height and apex",
+    ("Swing target", "terrain-aware landing height and apex",
      ["swing target off", "swing target z", "swing target z+apex"]),
-    ("Foothold residual - Step 3 Phase 2",
+    ("Foothold residual",
      "explicit foot-placement outputs (450 iterations, half the baseline)",
      ["foothold residual unsupervised", "foothold residual x",
       "foothold residual x+y"]),
-    ("Gradient window - Step 4", "48 differentiated physics steps per update, not 24",
+    ("Gradient window", "48 differentiated physics steps per update, not 24",
      ["window 48 steps (41 s)", "window 48 steps (82 s)"]),
 ]
 CAMPAIGN_BASELINE = "blind"          # the 3-seed band every panel is read against
@@ -136,11 +136,11 @@ EXPERIMENT_BY_PREFIX = {"bench": "exp1", "train": "exp2", "smoke": "smoke",
                         "control": "control"}
 SMOKE_MAX_ITERS = 100      # a sizing probe is shorter than a bench run
 
-# Run sets that are no longer results. `train_invalid/` is the Experiment 2 campaign
-# from before the ground-contact fix, retired in CAMPAIGN_FINDINGS §17.6. It uses the
-# same mode names as `train/`, so it groups straight into the live series unless it is
-# named here -- and because seed_label() counts DISTINCT seeds, the doubled group still
-# reported "3 seeds" while averaging six runs.
+# Run sets that are no longer results. `train_invalid/` is the retired Experiment 2
+# campaign from before the ground-contact fix. It uses the same mode names as `train/`, so
+# it groups straight into the live series unless it is named here -- and because
+# seed_label() counts DISTINCT seeds, the doubled group still reported "3 seeds" while
+# averaging six runs.
 RETIRED_PREFIXES = {"train_invalid"}
 
 
@@ -373,7 +373,7 @@ def _end_labels(ax, entries, headroom=0.22):
 
 def plot_scaling(runs, out_dir, value_fn, ylabel, title, filename, logy,
                  caption=None, inherited=None):
-    """Experiment 1: one line per variant, x = num_envs (log).
+    """Experiment 1: one line per variant, x = batch size on an ordinal axis.
 
     `runs` is expected to be already narrowed to Experiment 1 (see `select`).
     `value_fn(run) -> float | None` supplies the y value, so a figure can plot a
@@ -391,26 +391,34 @@ def plot_scaling(runs, out_dir, value_fn, ylabel, title, filename, logy,
         print(f"[collect] no Experiment 1 runs found, skipping {filename}")
         return
 
+    # Ordinal x axis: every measured batch size gets the same width. The sizes are
+    # not a constant ratio apart (16 -> 1024 quadruples, 1024 -> 4096 doubles), so a
+    # true log axis crowds the three largest batches into the right-hand quarter and
+    # leaves their markers overlapping. Equal spacing costs the axis its metric
+    # meaning -- horizontal distance is "next configuration we ran", not a fixed
+    # factor in B -- so slopes must not be compared across the axis; read the
+    # figure point by point against the tick labels.
+    xticks = sorted({x for pts in series.values() for x, _ in pts}
+                    | ({int(inherited[0])} if inherited is not None else set()))
+    slot = {b: i for i, b in enumerate(xticks)}
+
     fig, ax = plt.subplots(figsize=(6.4, 4.0), dpi=160)
     for i, (name, pts) in enumerate(sorted(series.items())):
         pts.sort()
-        xs = [p[0] for p in pts]
+        xs = [slot[p[0]] for p in pts]
         ys = [p[1] for p in pts]
         c = color_for(name, i)
         # The variants converge at large batch, so direct end labels would sit on
         # top of each other; identity comes from the legend, backed by runs.csv.
         ax.plot(xs, ys, "-o", color=c, linewidth=2, markersize=6,
                 markeredgecolor="white", markeredgewidth=1.2, label=name, zorder=3)
-    xticks = {x for pts in series.values() for x, _ in pts}
     if inherited is not None:
         # A single measured point, not a curve -- drawn as a lone marker so it can
         # never be read as a scaling line it has no data for.
         bx, by = inherited
-        ax.plot([bx], [by], "D", color=color_for("inherited", 0), markersize=8,
+        ax.plot([slot[int(bx)]], [by], "D", color=color_for("inherited", 0), markersize=8,
                 markeredgecolor="white", markeredgewidth=1.4, zorder=4,
                 linestyle="none", label="inherited (single measurement)")
-        xticks.add(int(bx))
-    ax.set_xscale("log", base=2)
     if logy:
         ax.set_yscale("log")
     else:
@@ -419,9 +427,10 @@ def plot_scaling(runs, out_dir, value_fn, ylabel, title, filename, logy,
         # 68x the memory of 16"). Anchoring the axis at 0 is what makes those ratios
         # readable straight off the gridlines instead of off a floating baseline.
         ax.set_ylim(bottom=0)
-    ax.set_xticks(sorted(xticks))
-    ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
-    _style(ax, "parallel robots (num_envs)", ylabel, title)
+    ax.set_xticks(range(len(xticks)))
+    ax.set_xticklabels([str(b) for b in xticks])
+    ax.set_xlim(-0.35, len(xticks) - 0.65)
+    _style(ax, "batch size (B)", ylabel, title)
     ax.legend(frameon=False, fontsize=8, labelcolor=INK_MUTED, loc="best")
     if caption:
         # Wrapped by hand: fig.text does no wrapping, and an unwrapped caption
@@ -798,7 +807,7 @@ def plot_campaign_arms(runs, results_dir, out_dir, filename="fig_campaign_arms.p
             ax.plot(x, y, color=c, linewidth=2, zorder=4)
             last = np.flatnonzero(np.isfinite(y))
             if last.size:
-                # The Phase 2 arms stop at half the baseline's simulated time, so the
+                # The foothold-residual arms stop at half the baseline's simulated time, so the
                 # label sits mid-panel; the dot is what ties it to its own line.
                 ax.plot([x[last[-1]]], [y[last[-1]]], "o", color=c, markersize=5,
                         markeredgecolor="white", markeredgewidth=1.2, zorder=5)
@@ -894,10 +903,9 @@ def main():
                  # 0.73 -> 2.58 it/s is well under one decade, so a log axis labels
                  # itself "10^0 / 2x10^0" -- powers of ten for numbers that are just
                  # 1 and 2 -- and visually flattens a 3.5x spread. Linear, from zero.
-                 "fig_speed_itps.png", logy=False, inherited=ref_itps,
-                 caption="Iterations/s at fixed work per iteration (24 differentiated "
-                         "physics steps). Falling it/s is the per-iteration cost of a "
-                         "bigger batch, not a scaling loss -- see robot-steps/s.")
+                 # No in-figure caption: this one carries a LaTeX \caption in the
+                 # thesis, and the same sentence printed twice reads as a mistake.
+                 "fig_speed_itps.png", logy=False, inherited=ref_itps)
     plot_scaling(exp1, out_dir, robot_steps_per_s,
                  "robot-steps / s", "Simulation throughput vs. batch size",
                  "fig_speed_throughput.png", logy=True, inherited=ref_steps,

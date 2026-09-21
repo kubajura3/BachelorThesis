@@ -80,25 +80,24 @@ MODE_CFG = {
     "blind_omni":  (dict(terrain_type="flat", cmd_style="rudin"),                                                "_blindomni"),
     # As blind_omni, but with legged_gym's heading command: the yaw target is a heading and the
     # yaw-rate command decays as the robot turns to face it, instead of being held for the whole
-    # episode. Pairs with `blind_omni` to isolate that one change -- see CAMPAIGN_FINDINGS.md 19.10.
+    # episode. Pairs with `blind_omni` to isolate that one change.
     "blind_omni_heading": (dict(terrain_type="flat", cmd_style="rudin", heading_command=True),                    "_blindomnih"),
     # Command-isolation arms for Exp 2, mirroring what blind_omni did for flat ground. The Exp-2
     # runs cannot say whether the curriculum collapse comes from the stairs or from the
-    # omnidirectional command set, because terrain_type also picked the command ranges
-    # (CAMPAIGN_FINDINGS.md 19.11). Both styles below are forward-only (vy_min/max and
-    # yaw_min/max are 0): "_fwd" is Song sec 3.2's constant 0.5 m/s, which pairs with the
-    # existing flat `blind` run for a one-variable terrain comparison; "_rand" varies speed over
-    # vx_min..vx_max, which is what sec 6.4/6.5 would actually use.
+    # omnidirectional command set, because terrain_type also picked the command ranges.
+    # Both styles below are forward-only (vy_min/max and yaw_min/max are 0): "_fwd" is the
+    # paper's constant 0.5 m/s, which pairs with the existing flat `blind` run for a
+    # one-variable terrain comparison; "_rand" varies speed over vx_min..vx_max.
     "blind_rudin_fwd":  (dict(terrain_type="rudin", cmd_style="fixed"),                                          "_blindr_fwd"),
     "blind_rudin_rand": (dict(terrain_type="rudin", cmd_style="rand"),                                           "_blindr_rand"),
     "hobs_fwd":         (dict(terrain_type="rudin", cmd_style="fixed",
                               use_perception=True, use_height_obs=True),                                         "_hobs_fwd"),
-    # Step 3 (STEP3_FOOTHOLD.md). Phase 1: terrain-aware swing target, no action-space change,
-    # driven entirely by the FOOT_Z_TERRAIN / FOOT_APEX_TERRAIN env vars so one mode covers the
-    # inertness, z-only and z+apex arms. use_terrain_loss stays off on purpose -- the clearance
-    # term would move at the same time and cost the phase its one-variable reading.
+    # Terrain-aware swing target, no action-space change, driven entirely by the
+    # FOOT_Z_TERRAIN / FOOT_APEX_TERRAIN env vars so one mode covers the inertness, z-only and
+    # z+apex arms. use_terrain_loss stays off on purpose -- the clearance term would move at
+    # the same time and cost the comparison its one-variable reading.
     "fz_fwd":      (dict(terrain_type="rudin", cmd_style="fixed", use_perception=True),                          "_fz_fwd"),
-    # Phase 2: adds the height scan (the residual has to see the terrain) on top. The residual
+    # Adds the height scan (the foothold residual has to see the terrain) on top. The residual
     # itself is FOOT_RES=1, and its weights are FOOT_Q_W / FOOT_RES_W.
     "fhold_fwd":   (dict(terrain_type="rudin", cmd_style="fixed",
                          use_perception=True, use_height_obs=True),                                              "_fhold_fwd"),
@@ -256,13 +255,13 @@ def train(num_iters=1000, steps_per_iter=24,
     env = RealQuadEnv(cfg, device=device)
     B = env.B
 
-    # Step 3: the policy also emits a per-leg foothold correction. n_res = 0 unless FOOT_RES is
+    # With FOOT_RES the policy also emits a per-leg foothold correction. n_res = 0 unless it is
     # set, and the n_res == 0 path in the rollout never slices the action, so a default run is
     # unchanged. y is separate and off by default: srbd.foot_positions_srbd has no lateral DOF
     # (off_body y is identically 0), so loss_foot can only punish a y correction, never reward
     # one. Resolved here, above meta.json, so the recorded dim_action is the one actually used.
     n_res = (4 + (4 if cfg.foot_res_y else 0)) if cfg.foot_res else 0
-    # Every Step 3 switch reads the terrain through env.terrain_height_diff, which asserts on
+    # Every FOOT_* switch reads the terrain through env.terrain_height_diff, which asserts on
     # cfg.use_perception. Caught here, by name, rather than as a bare assertion 24 steps into
     # the first rollout -- the flags are env vars and pairing one with a blind MODE is the
     # obvious mistake to make.
@@ -272,7 +271,7 @@ def train(num_iters=1000, steps_per_iter=24,
     if _foot_flags and not getattr(cfg, "use_perception", False):
         raise SystemExit(
             "%s set but MODE=%r has use_perception=False. The terrain lookup needs the height "
-            "field -- use MODE=fz_fwd (phase 1) or MODE=fhold_fwd (phase 2)."
+            "field -- use MODE=fz_fwd (swing target) or MODE=fhold_fwd (foothold residual)."
             % (" / ".join(_foot_flags), mode))
     dim_action = 12 + n_res
 
@@ -284,15 +283,15 @@ def train(num_iters=1000, steps_per_iter=24,
         "force_dtype": FORCE_DTYPE,
         "pure_paper_mode": PURE_PAPER_MODE,
         "terrain_type": cfg.terrain_type,
-        # The command protocol, recorded because terrain_type no longer implies it: 19.2
-        # decoupled the two and a run folder is otherwise unable to say which arm it is.
+        # The command protocol, recorded because terrain_type no longer implies it: the two
+        # are decoupled and a run folder is otherwise unable to say which arm it is.
         "cmd_style": resolve_cmd_style(cfg),
         "heading_command": heading_command_active(cfg),
-        # Soft tilt barrier (Step 1c). Recorded for the same reason cmd_style is: without
-        # it a run folder cannot say which arm it is, which is 19.2's lesson.
+        # Soft tilt barrier. Recorded for the same reason cmd_style is: without it a run
+        # folder cannot say which arm it is.
         "tilt_w": cfg.tilt_w,
         "tilt_on": cfg.tilt_on,
-        # Perceptive foothold (Step 3), same reason as tilt_w above: a run folder must be able
+        # Perceptive foothold, same reason as tilt_w above: a run folder must be able
         # to say which arm it is. dim_action is here because it is no longer always 12 -- the
         # play/eval scripts read it back to size the policy for a checkpoint.
         "foot_z_terrain": cfg.foot_z_terrain,
@@ -342,12 +341,12 @@ def train(num_iters=1000, steps_per_iter=24,
     # gravity projection, foot tracking, terrain clearance (terrain mode only).
     a1, a2, a3, a4, a5, a6 = 10, 1.0, 0.01, 0.01, 0.5, 5.0
     a7 = 3.0
-    # Soft tilt barrier (Step 1c), off unless TILT_W is set. See config.py and
-    # utils_math.tilt_barrier. np.cos rather than math.cos: numpy is already imported here.
+    # Soft tilt barrier, off unless TILT_W is set. See config.py and utils_math.tilt_barrier.
+    # np.cos rather than math.cos: numpy is already imported here.
     a8 = float(cfg.tilt_w)
     cos_tilt_on = float(np.cos(cfg.tilt_on))
-    # Perceptive foothold (Step 3), both 0 unless set. a9 buys good ground, a10 keeps Raibert as
-    # the prior. Calibrate from a weights-0 probe the way 22.3 calibrated a8 -- loss_fq and
+    # Perceptive foothold, both 0 unless set. a9 buys good ground, a10 keeps Raibert as the
+    # prior. Calibrate from a weights-0 probe, the same way a8 is calibrated -- loss_fq and
     # loss_fres are logged even at weight 0 for exactly that.
     a9 = float(cfg.foot_q_w)
     a10 = float(cfg.foot_res_w)
@@ -359,13 +358,13 @@ def train(num_iters=1000, steps_per_iter=24,
     on_terrain = (cfg.terrain_type == "rudin")
     # True when the run carries a live yaw command, which is what the yaw reference below actually
     # depends on. This used to reuse `on_terrain`, which was equivalent only while terrain_type
-    # also selected the command ranges. 19.2 decoupled them and the gate was not updated, so
+    # also selected the command ranges. Decoupling the two left this check un-updated, so
     # `blind_omni` (flat terrain + Rudin commands) drew yaw commands from +-1 rad/s while loss_yaw
     # still measured yaw against a *fixed* reset heading. loss_omega's yaw-rate term then rewarded
     # obeying that command (a3 = 0.01) while loss_yaw punished the heading drift obeying it
     # produces (yaw_w = 0.1) -- two terms pulling opposite ways, the wrong one 10x heavier. That
-    # confounded the 19 arm-A measurement; see CAMPAIGN_FINDINGS.md 19.9. Resolved through the
-    # same helper _sample_command uses so the two cannot drift apart again.
+    # confounded the flat-terrain measurement. Resolved through the same helper _sample_command
+    # uses, so the two cannot drift apart again.
     cmd_has_yaw = (resolve_cmd_style(cfg) == "rudin")
     use_heading_cmd = heading_command_active(cfg)
 
@@ -428,7 +427,7 @@ def train(num_iters=1000, steps_per_iter=24,
         omega_hist, gproj_hist = [], []
         foot_ref_hist = []
         clearance_hist = []
-        fq_hist = []            # foothold-quality cost per step (Step 3)
+        fq_hist = []            # foothold-quality cost per step
         res_hist = []           # foothold residual per step, for its L2 prior and diagnostics
         cmd_hist = []       # per-step high-level command [vx_cmd, vy_cmd, yaw_cmd]
         yawref_hist = []    # per-step commanded yaw reference (terrain only; see loss_yaw)
@@ -439,8 +438,8 @@ def train(num_iters=1000, steps_per_iter=24,
         n_falls_iter = 0
         n_timeouts_iter = 0
         # Fall-cause diagnostics (see bench.stop below). Which half of env.py's fall rule
-        # fired, and how high the base sat while it did -- the campaign could only see the
-        # OR of the two, so a robot dropping flat and a robot toppling looked identical.
+        # fired, and how high the base sat while it did. Without them only the OR of the
+        # two is visible, so a robot dropping flat and a robot toppling look identical.
         n_fall_h_iter = 0        # falls where the height half fired
         n_fall_t_iter = 0        # falls where the tilt half fired (both can fire at once)
         base_h_sum = 0.0         # sum over steps of the batch-mean base height
@@ -481,11 +480,11 @@ def train(num_iters=1000, steps_per_iter=24,
                     a = a_prev
                     hx = hx_hold
 
-            # ------------------- Step 3: split off the foothold correction ----------------
+            # ------------------- split off the foothold correction ----------------
             # env.step takes exactly 12 joint offsets and applies tanh * delta_q_scale12 to
             # them; the residual has its own squashing and its own scale, so it must never
             # enter there. When n_res == 0 the action is passed straight through untouched --
-            # not sliced -- so a default run is byte-for-byte the pre-Step-3 one.
+            # not sliced -- so a run without FOOT_RES is byte-for-byte the earlier one.
             if n_res:
                 a_joint = a[:, :12]
                 # Body frame, metres. Always (B,4,2): the y column is zeros when foot_res_y is
@@ -622,12 +621,12 @@ def train(num_iters=1000, steps_per_iter=24,
                 clearance_hist.append(clear_viol * swing_mask.squeeze(-1))     # (B,4)
 
             if n_res:
-                # Step 3 foothold quality: is the ground around the planned foothold flat?
+                # Foothold quality: is the ground around the planned foothold flat?
                 # Sampled at env.gait.foothold_plan_xy, which the planner publishes attached
                 # (unlike swing_progress) precisely so this term can push the residual through
                 # it. This is the ONLY channel that shapes the residual toward *good* ground --
-                # loss_foot's copy of it is detached by default (STEP3_FOOTHOLD.md 4.3) and the
-                # L2 prior below only shrinks it.
+                # loss_foot's copy of it is detached by default, and the L2 prior below only
+                # shrinks it.
                 #
                 # Swing legs only, like loss_foot and loss_clear: a stance leg's planned
                 # foothold is not what it is standing on and says nothing about the next step.
@@ -721,8 +720,8 @@ def train(num_iters=1000, steps_per_iter=24,
             # yaw tracking. Note this is *heading angle*, distinct from the yaw-*rate* tracking
             # already inside loss_omega ((omega_z - yaw_cmd)^2, a3 = 0.01) -- that term is the
             # analogue of Rudin's tracking_ang_vel; this one has no legged_gym counterpart and is
-            # weighted 10x heavier. Whether it belongs in a matched-protocol comparison is an open
-            # question for the PPO chapter, see CAMPAIGN_FINDINGS.md 19.11.
+            # weighted 10x heavier. Whether it belongs in a matched-protocol comparison is an
+            # open question for the PPO comparison.
             if yawref_hist:
                 yaw_ref = torch.stack(yawref_hist).detach()                        # (T,B)
             else:
@@ -812,8 +811,8 @@ def train(num_iters=1000, steps_per_iter=24,
             g_xy_norm = g_xy / cfg.g
             loss_gproj = (g_xy_norm ** 2).sum(dim=-1).mean()
 
-            # Soft tilt barrier (Step 1c) -- the differentiable stand-in for term_penalty,
-            # which only ever reached episodic_reward. Reuses gproj_seq rather than rebuilding
+            # Soft tilt barrier -- the differentiable stand-in for term_penalty, which only
+            # ever reached episodic_reward. Reuses gproj_seq rather than rebuilding
             # an attitude tensor: env.srbd_q is the only differentiable path to the orientation
             # (`done` is a bool and env.roll/env.pitch come from Isaac state), and gproj_seq is
             # already built from it, so this inherits loss_gproj's conventions exactly and adds
@@ -843,9 +842,9 @@ def train(num_iters=1000, steps_per_iter=24,
         else:
             loss_clearance = torch.tensor(0.0, device=device)
 
-        # Perceptive foothold (Step 3). Both are computed and logged whenever the residual is
-        # on, including at weight 0 -- that weights-0 run is what the weights get calibrated
-        # from, which is the 22.3 procedure that worked for the tilt barrier.
+        # Perceptive foothold. Both are computed and logged whenever the residual is on,
+        # including at weight 0 -- that weights-0 run is what the weights get calibrated from,
+        # the same procedure that worked for the tilt barrier.
         if fq_hist:
             loss_fq = torch.stack(fq_hist).mean()
             res_seq = torch.stack(res_hist)                 # (T,B,4,2)
@@ -856,8 +855,8 @@ def train(num_iters=1000, steps_per_iter=24,
             foot_res_abs = res_seq.detach().norm(dim=-1).mean()
             # Split by axis as well. The norm above answers "did the foothold move";
             # only these answer "along which axis", and that is the entire question the
-            # FOOT_RES_Y arm exists to ask -- 2.1 predicts y is unusable (the SRBD leg FK
-            # has no lateral DOF), so y_abs collapsing toward 0 while x_abs holds is the
+            # FOOT_RES_Y arm exists to ask -- y is expected to be unusable (the SRBD leg FK
+            # has no lateral DOF), so y_abs collapsing toward 0 while x_abs holds is that
             # prediction being confirmed, and the norm alone cannot show it.
             foot_res_x_abs = res_seq.detach()[..., 0].abs().mean()
             foot_res_y_abs = res_seq.detach()[..., 1].abs().mean()
@@ -879,12 +878,13 @@ def train(num_iters=1000, steps_per_iter=24,
                 yaw_w * loss_yaw
                 )
         # Guarded rather than folded into the sum above: at a8 == 0 the loss expression is
-        # then byte-for-byte the pre-1c one, which is what the inertness reprocheck asserts.
+        # then byte-for-byte the one without the barrier, which is what the inertness check
+        # in tests/test_tilt_barrier.py asserts.
         if a8 > 0.0:
             loss = loss + a8 * loss_tilt
-        # Same guard, same reason (STEP3_FOOTHOLD.md 4.5): at a9 == a10 == 0 the objective is
-        # byte-for-byte the pre-Step-3 one, so a weights-0 probe measures the terms' natural
-        # size without changing the run it measures.
+        # Same guard, same reason: at a9 == a10 == 0 the objective is byte-for-byte the one
+        # without the foothold terms, so a weights-0 probe measures their natural size without
+        # changing the run it measures.
         if a9 > 0.0:
             loss = loss + a9 * loss_fq
         if a10 > 0.0:
@@ -948,16 +948,16 @@ def train(num_iters=1000, steps_per_iter=24,
         # share of the objective, and foot_res_abs_mean (metres) says whether the residual moved
         # at all -- and, read against cfg.foot_res_max, whether it saturated the tanh.
         # Without the third, "the correction did nothing" and "the correction stayed at zero"
-        # look identical in the results -- which is the mistake 22.4 was able to avoid.
+        # look identical in the results.
         loss_fq_hist_iter.append(float(loss_fq.detach().cpu()))
         loss_fres_hist_iter.append(float(loss_fres.detach().cpu()))
         foot_res_abs_iter.append(float(foot_res_abs.cpu()))
         foot_res_x_abs_iter.append(float(foot_res_x_abs.cpu()))
         foot_res_y_abs_iter.append(float(foot_res_y_abs.cpu()))
         # Yaw diagnostics. loss_yaw is in the objective (yaw_w below) but was never written to
-        # iters.csv, which is why 19.9's finding -- the flat arm being penalised against a fixed
-        # reset heading while carrying a live yaw command -- was invisible in the arm-A run and
-        # had to be found by reading code. mean_abs_yaw_cmd is the commanded yaw-rate magnitude
+        # iters.csv, which is why the flat arm being penalised against a fixed reset heading
+        # while carrying a live yaw command stayed invisible in the run folders and had to be
+        # found by reading code. mean_abs_yaw_cmd is the commanded yaw-rate magnitude
         # averaged over the window; under the heading command it should *decay* as robots turn to
         # face their targets, where a held yaw rate keeps it flat. Same detach-and-sync pattern
         # as the rows above, so it adds nothing inside the step loop.
@@ -989,9 +989,9 @@ def train(num_iters=1000, steps_per_iter=24,
                    loss_v=loss_v_hist_iter[-1], loss_clear=loss_clear_hist_iter[-1],
                    # Attitude / effort terms alongside the two that were already here. All three
                    # are already computed and cached above, so this costs nothing, and they are
-                   # the columns the Exp-2 post-mortem had to reconstruct from the .npy sidecars
-                   # by hand. loss_gproj in particular is the tilt measure the fall analysis turns
-                   # on -- see CAMPAIGN_FINDINGS.md sec 18.4.
+                   # the columns an earlier post-mortem had to reconstruct from the .npy
+                   # sidecars by hand. loss_gproj in particular is the tilt measure the fall
+                   # analysis turns on.
                    loss_gproj=loss_gproj_hist_iter[-1],
                    loss_tilt=loss_tilt_hist_iter[-1],
                    tilt_frac_active=tilt_frac_active_iter[-1],

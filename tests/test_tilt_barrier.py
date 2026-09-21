@@ -1,4 +1,4 @@
-"""Soft tilt barrier (Step 1c): the geometry, the hinge, and the gradient.
+"""Soft tilt barrier: the geometry, the hinge, and the gradient.
 
 Needs torch but not isaacgym, so it runs anywhere the training stack is installed and takes
 about a second. What it protects, in order of severity:
@@ -6,13 +6,13 @@ about a second. What it protects, in order of severity:
   * The **sign**. `utils_math.tilt_barrier` reads the tilt off the z component of the
     gravity projection. Flip that sign and the term rewards falling over -- a training run
     would still complete, still log a plausible-looking loss, and quietly optimise for the
-    opposite of what CAMPAIGN_FINDINGS.md 20.8 asked for. Nothing else in the repo would
-    catch it.
+    opposite of what the term is meant to do. Nothing else in the repo would catch it.
   * The **relationship to loss_gproj**, via the identity |g_xy/g|^2 + cos_tilt^2 == 1. The
     two terms share `gproj_seq`; this pins them together.
   * The **hinge**, including that the term is exactly inert -- value *and* gradient --
-    below it. That is what makes TILT_W=0 a byte-for-byte reproduction of the pre-1c
-    objective, and what keeps the term silent at the ~16 deg lean the policy walks with.
+    below it. That is what makes TILT_W=0 a byte-for-byte reproduction of the objective
+    without the barrier, and what keeps the term silent at the ~16 deg lean the policy
+    walks with.
 """
 import math
 import os
@@ -167,7 +167,7 @@ def test_past_the_hinge_matches_the_closed_form(roll):
 
 
 def test_value_at_the_termination_threshold():
-    """The number quoted in the plan and in CAMPAIGN_FINDINGS, pinned."""
+    """The value at the termination threshold, pinned so the hinge cannot drift."""
     loss, _ = tilt_barrier(gravity_projection([(FALL_TILT, 0.0, 0.0)]), G, COS_ON)
     assert float(loss) == pytest.approx(0.0415041, abs=1e-6)
 
@@ -247,7 +247,7 @@ def test_it_accepts_the_stacked_rollout_shape():
 def test_a_later_hinge_is_a_weaker_term():
     """cos is decreasing in tilt, so a smaller cos_on means the barrier engages later.
 
-    Guards the direction of the TILT_ON knob: the null-result fallback in the plan is
+    Guards the direction of the TILT_ON knob: the obvious response to a null result is
     "lower TILT_ON so it fires more often", and that only holds if this is true.
     """
     g_body = gravity_projection([(0.8, 0.0, 0.0)])

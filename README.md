@@ -92,12 +92,12 @@ python -m perception.visualize_perception --device cpu
 | `evaluate_rudin_comparison.py` | deterministic evaluation, and the saliency corruption harness |
 | `play_many_dog.py` | viewer playback of a checkpoint |
 | `collect_bench.py` | merges run folders into `runs.csv` and every thesis figure, needs no torch |
-| `collect_step1c.py`, `collect_step3.py`, `collect_saliency.py` | readers for the three diagnostic campaigns |
+| `collect_tilt.py`, `collect_foothold.py`, `collect_saliency.py` | readers for the three diagnostic campaigns |
 | `setup.py` | builds the SRBD CUDA extension |
 | `go2_description.urdf` | the robot |
 | `perception/` | Warp depth camera, differentiable height sampler, preprocessing |
 | `src/srbd_cuda.cu`, `src/srbd_ext.cpp` | the fused kernel and its pybind11 bindings |
-| `run_campaign.sh`, `run_step1c.sh`, `run_step3.sh`, `run_saliency.sh` | run queues, described further down |
+| `run_campaign.sh`, `run_tilt.sh`, `run_foothold.sh`, `run_saliency.sh` | run queues, described further down |
 | `tests/` | parity and gradient tests, several of which run on CPU |
 | `results/` | every run folder from the thesis campaign |
 
@@ -397,7 +397,7 @@ MODE=blind_rudin_fwd  SEED=0 ITERS=850 NUM_ENVS=1024 RUN_DIR=results/diag20/blin
 MODE=blind_rudin_rand SEED=0 ITERS=850 NUM_ENVS=1024 RUN_DIR=results/diag20/blind_rudin_rand_s0 python train.py
 MODE=hobs_fwd         SEED=0 ITERS=850 NUM_ENVS=1024 RUN_DIR=results/diag20/hobs_fwd_s0 python train.py
 
-./run_step3.sh seeds     # baseline seeds 1 and 2, into results/diag21/rudin_fwd_w0_s{1,2}
+./run_foothold.sh seeds  # baseline seeds 1 and 2, into results/diag21/rudin_fwd_w0_s{1,2}
 ```
 
 The three baseline seeds are the noise band every treatment arm is read against. They end at mean
@@ -406,12 +406,12 @@ height scan in the observation delays the curriculum collapse roughly twofold be
 the same floor. It is one seed, so treat it as a remark rather than a result.
 
 **Soft tilt barrier**, the second limitation the paper names for itself, implemented as a
-differentiable stand in for a termination penalty. `run_step1c.sh` covers the wiring test, the flat
+differentiable stand in for a termination penalty. `run_tilt.sh` covers the wiring test, the flat
 control pair and the calibration probe:
 
 ```bash
-./run_step1c.sh all      # about 14 min
-python collect_step1c.py
+./run_tilt.sh all        # about 14 min
+python collect_tilt.py
 ```
 
 The two Rudin arms were run directly, at the weights the probe implies, which put the term at 5.1 %
@@ -424,15 +424,15 @@ MODE=blind_rudin_fwd SEED=0 ITERS=850 NUM_ENVS=1024 TILT_W=48 RUN_DIR=results/di
 ```
 
 **Perceptive foothold**, the first limitation the paper names, that the method cannot explore foot
-placement through the velocity tracking loss alone. Phase 1 changes where the swing foot is aimed.
-Phase 2 gives the policy explicit per leg foothold residual outputs.
+placement through the velocity tracking loss alone. The first stage changes where the swing foot
+is aimed. The second gives the policy explicit per leg foothold residual outputs.
 
 ```bash
-./run_step3.sh phase1                     # fz_off, fz_z, fz_za, about 45 min
-./run_step3.sh wiring                     # the same identity at iteration 0, on loss_fq
-./run_step3.sh probe2                     # calibration in the regime the arms actually run in
-./run_step3.sh xy                         # the two Phase 2 arms
-python collect_step3.py
+./run_foothold.sh swing                   # fz_off, fz_z, fz_za, about 45 min
+./run_foothold.sh wiring                  # the same identity at iteration 0, on loss_fq
+./run_foothold.sh probe2                  # calibration in the regime the arms actually run in
+./run_foothold.sh xy                      # the two foothold residual arms
+python collect_foothold.py
 ```
 
 The `xy` stage calibrates its own weights from the probe run, which in the runs on disk gave

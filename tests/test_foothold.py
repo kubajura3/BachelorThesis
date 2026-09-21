@@ -1,17 +1,17 @@
-"""Perceptive foothold (Step 3): the swing-target geometry and the foothold-quality cost.
+"""Perceptive foothold: the swing-target geometry and the foothold-quality cost.
 
 Needs torch but not isaacgym, so it runs anywhere the training stack is installed -- the same
 split that makes tests/test_tilt_barrier.py and tests/test_perception_grad.py laptop-runnable.
 What it protects, in order of severity:
 
-  * **Inertness.** With the Step 3 flags off, the apex formula must reduce *bit-exactly* to the
-    pre-Step-3 `0.5*(p0_z + p1_z) + h`. Every claim in STEP3_FOOTHOLD.md that "a run setting no
-    FOOT_* variable reproduces the numbers on disk" rests on this, and nothing else in the repo
-    would catch a silent drift.
+  * **Inertness.** With the FOOT_* flags off, the apex formula must reduce *bit-exactly* to
+    the terrain-blind `0.5*(p0_z + p1_z) + h`. The claim that a run setting no FOOT_* variable
+    reproduces the numbers already on disk rests on this, and nothing else in the repo would
+    catch a silent drift.
   * **The direction of the quality cost.** `foothold_quality` is the only term that shapes the
     residual toward good ground. If its gradient pointed *into* the edge instead of away from
     it, training would still complete and still log a plausible loss while optimising for
-    exactly the wrong thing -- the Step 1(c) sign trap (CAMPAIGN_FINDINGS.md 22) one layer down.
+    exactly the wrong thing -- the same sign trap as the tilt barrier, one layer down.
   * **The apex actually clearing a riser**, which is the whole point of sampling the chord
     rather than just its endpoints.
 
@@ -267,8 +267,8 @@ def test_residual_padding_keeps_y_at_zero_when_disabled():
 def test_detached_residual_has_no_gradient_path_but_the_plan_does():
     """`res.detach()` in the target and `res` in the plan: one path dead, the other live.
 
-    This is the guard from STEP3_FOOTHOLD.md 4.3. If the detach were dropped, loss_foot could
-    be minimised by dragging the target onto the foot rather than moving the foot.
+    This is the guard against the degenerate minimum: if the detach were dropped, loss_foot
+    could be minimised by dragging the target onto the foot rather than moving the foot.
     """
     res = torch.zeros(2, 4, 2, requires_grad=True)
     raibert = torch.randn(2, 4, 2, generator=_gen(13))
@@ -287,7 +287,7 @@ def test_detached_residual_has_no_gradient_path_but_the_plan_does():
 # ---------------------------------------------------------------------------
 # 6. Full inertness of the target-building path
 # ---------------------------------------------------------------------------
-def test_target_construction_matches_the_pre_step3_formula_when_flags_are_off():
+def test_target_construction_matches_the_terrain_blind_formula_when_flags_are_off():
     """Reproduces gait.py's p1/pm construction both ways and demands bit equality.
 
     The rewrite swapped `torch.zeros_like` + in-place slice writes for `torch.cat` (needed
@@ -317,7 +317,7 @@ def test_target_construction_matches_the_pre_step3_formula_when_flags_are_off():
 
 def test_swing_parabola_endpoints_and_x_gradient_profile():
     """Without the no_grad decorator the parabola must still interpolate the three points,
-    and d p_swing_x / d p1_x must be s^2 -- the profile STEP3_FOOTHOLD.md 4.2 relies on."""
+    and d p_swing_x / d p1_x must be s^2 -- the profile the foothold residual relies on."""
     def parabola(p0, pm, p1, s):
         c = p0
         b = 4 * (pm - (p0 + p1) / 2.0)
